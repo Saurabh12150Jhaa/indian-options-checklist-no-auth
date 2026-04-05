@@ -19,6 +19,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from backtester.utils import get_recent_ohlc
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  STRUCTURE DETECTION HELPERS
@@ -364,36 +366,13 @@ def run_smc_analysis(df: pd.DataFrame, lookback: int = 5) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _get_recent_ohlc(engine, dt: date, lookback: int = 50) -> Optional[pd.DataFrame]:
-    """Extract recent underlying OHLC from the options data for SMC analysis."""
-    dates = [d for d in engine.trading_dates if d <= dt][-lookback:]
-    if len(dates) < 10:
-        return None
-    rows = []
-    for d in dates:
-        price = engine.get_underlying_price(d)
-        if price:
-            chain = engine.get_chain_on_date(d)
-            if not chain.empty:
-                rows.append({
-                    "date": d,
-                    "open": price * 0.998,  # approximate (bhavcopy has close only for underlying)
-                    "high": price * 1.005,
-                    "low": price * 0.995,
-                    "close": price,
-                })
-    if len(rows) < 10:
-        return None
-    return pd.DataFrame(rows)
-
-
 def smc_bullish_ob_entry(engine, dt, chain, spot, expiry):
     """
     SMC Strategy: Enter bullish trades when price retests a bullish Order Block
     in the discount zone, confirmed by bullish BOS.
     Trade: Bull Put Spread (credit, bullish).
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -433,7 +412,7 @@ def smc_bearish_ob_entry(engine, dt, chain, spot, expiry):
     in the premium zone, confirmed by bearish BOS.
     Trade: Bear Call Spread (credit, bearish).
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -470,7 +449,7 @@ def smc_liquidity_sweep_reversal(engine, dt, chain, spot, expiry):
     After a bearish sweep (stops taken below swing low, then reversal up) -> Buy Call.
     After a bullish sweep (stops taken above swing high, then reversal down) -> Buy Put.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -514,7 +493,7 @@ def smc_fvg_fill(engine, dt, chain, spot, expiry):
     Bullish FVG below price -> wait for pullback into gap, then buy calls.
     Bearish FVG above price -> wait for rally into gap, then buy puts.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -554,7 +533,7 @@ def smc_choch_trend_reversal(engine, dt, chain, spot, expiry):
     SMC Strategy: Trade Change of Character (CHoCH) reversals.
     When market structure shifts (CHoCH), enter in the new direction using spreads.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 

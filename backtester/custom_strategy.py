@@ -17,6 +17,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from backtester.utils import get_recent_ohlc
+
 logger = logging.getLogger(__name__)
 
 
@@ -281,23 +283,6 @@ class CustomStrategy:
         self.config = config
         self.name = config.get("name", "Custom Strategy")
 
-    def _get_ohlc(self, engine, dt: date, lookback: int = 50) -> Optional[pd.DataFrame]:
-        dates = [d for d in engine.trading_dates if d <= dt][-lookback:]
-        if len(dates) < 10:
-            return None
-        rows = []
-        for d in dates:
-            price = engine.get_underlying_price(d)
-            if price:
-                rows.append({
-                    "date": d,
-                    "open": price * 0.998,
-                    "high": price * 1.005,
-                    "low": price * 0.995,
-                    "close": price,
-                })
-        return pd.DataFrame(rows) if len(rows) >= 10 else None
-
     def evaluate_conditions(self, engine, dt, chain, spot) -> bool:
         """Evaluate all entry conditions."""
         conditions = self.config.get("conditions", [])
@@ -320,7 +305,7 @@ class CustomStrategy:
             needs = registry_entry["needs"]
             if needs == "ohlc":
                 if ohlc is None:
-                    ohlc = self._get_ohlc(engine, dt)
+                    ohlc = get_recent_ohlc(engine, dt)
                 if ohlc is None:
                     results.append(False)
                     continue

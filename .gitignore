@@ -5,3 +5,7 @@ __pycache__/
 .streamlit/secrets.toml
 *.db
 bhavcopy_access.json
+_originals/
+app.py.bak
+*.pyc
+__pycache__/

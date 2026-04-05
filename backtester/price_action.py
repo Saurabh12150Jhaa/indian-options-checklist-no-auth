@@ -19,6 +19,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from backtester.utils import get_recent_ohlc
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  PATTERN DETECTION
@@ -326,34 +328,13 @@ def run_price_action_analysis(df: pd.DataFrame) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _get_recent_ohlc(engine, dt: date, lookback: int = 50) -> Optional[pd.DataFrame]:
-    """Extract recent underlying OHLC from the options data."""
-    dates = [d for d in engine.trading_dates if d <= dt][-lookback:]
-    if len(dates) < 10:
-        return None
-    rows = []
-    for d in dates:
-        price = engine.get_underlying_price(d)
-        if price:
-            rows.append({
-                "date": d,
-                "open": price * 0.998,
-                "high": price * 1.005,
-                "low": price * 0.995,
-                "close": price,
-            })
-    if len(rows) < 10:
-        return None
-    return pd.DataFrame(rows)
-
-
 def pa_pin_bar_reversal(engine, dt, chain, spot, expiry):
     """
     Price Action: Trade reversals on pin bar (hammer/shooting star) patterns.
     Bullish hammer -> Bull Call Spread.
     Bearish shooting star -> Bear Put Spread.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -390,7 +371,7 @@ def pa_engulfing_momentum(engine, dt, chain, spot, expiry):
     Bullish engulfing -> Bull Call Spread.
     Bearish engulfing -> Bear Put Spread.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -427,7 +408,7 @@ def pa_inside_bar_breakout(engine, dt, chain, spot, expiry):
     Bullish breakout -> Bull Call Spread.
     Bearish breakdown -> Bear Put Spread.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -464,7 +445,7 @@ def pa_sr_breakout(engine, dt, chain, spot, expiry):
     Break above resistance -> Bull Call Spread.
     Break below support -> Bear Put Spread.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
@@ -501,7 +482,7 @@ def pa_ema_pullback_trend(engine, dt, chain, spot, expiry):
     Bullish pullback bounce -> Bull Call Spread.
     Bearish pullback rejection -> Bear Put Spread.
     """
-    ohlc = _get_recent_ohlc(engine, dt)
+    ohlc = get_recent_ohlc(engine, dt)
     if ohlc is None:
         return None
 
