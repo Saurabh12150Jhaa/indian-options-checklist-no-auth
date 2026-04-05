@@ -182,6 +182,61 @@ def _render_payoff_preview(legs: list, templates: dict, spot_estimate: float = 2
     st.plotly_chart(fig, width="stretch")
 
 
+def _render_backtest_results(report, config) -> None:
+    """Render backtest results (metrics, equity curve, trade log).
+
+    Extracted as a helper so it can be called both inside the Run-button
+    block *and* on subsequent reruns from session-state, fixing the
+    'results vanish on tab switch' bug.
+    """
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Total Trades", report.total_trades)
+    r2.metric("Win Rate", f"{report.win_rate}%")
+    r3.metric("Total P&L", f"INR {report.total_pnl:,.0f}")
+    r4.metric("Return", f"{report.return_pct}%")
+
+    r5, r6, r7, r8 = st.columns(4)
+    r5.metric("Avg P&L/Trade", f"INR {report.avg_pnl_per_trade:,.0f}")
+    r6.metric("Profit Factor", report.profit_factor)
+    r7.metric("Max Drawdown", f"INR {report.max_drawdown:,.0f}")
+    r8.metric("Sharpe Ratio", report.sharpe_ratio)
+
+    # Equity curve
+    if not report.equity_curve.empty:
+        eq_fig = go.Figure()
+        eq_fig.add_trace(go.Scatter(
+            x=report.equity_curve["date"],
+            y=report.equity_curve["equity"],
+            mode="lines", name="Equity",
+            line=dict(color="#42a5f5"),
+        ))
+        eq_fig.add_hline(y=config.initial_capital, line_dash="dash", line_color="white", opacity=0.5)
+        eq_fig.update_layout(
+            title="Equity Curve", height=400, template="plotly_dark",
+            yaxis_title="Capital (INR)",
+        )
+        st.plotly_chart(eq_fig, width="stretch")
+
+    # Trade log
+    if report.trades:
+        st.subheader("Trade Log")
+        trade_rows = []
+        for t in report.trades:
+            trade_rows.append({
+                "Entry": str(t.entry_date),
+                "Exit": str(t.exit_date),
+                "Strategy": t.strategy_name,
+                "Entry Premium": t.entry_premium,
+                "Exit Premium": t.exit_premium,
+                "P&L": t.pnl,
+                "P&L %": t.pnl_pct,
+                "Total P&L": t.total_pnl,
+                "DTE": t.dte_at_entry,
+            })
+        trade_df = pd.DataFrame(trade_rows)
+        st.dataframe(trade_df, width="stretch", hide_index=True)
+
+
 def render() -> None:
     """Render the Strategy Backtester tab content."""
 
@@ -709,54 +764,19 @@ def render() -> None:
                                 if strat_fn:
                                     report = engine.run(strat_fn)
 
+                                    # Store results in session state for persistence across tab switches
+                                    st.session_state["backtest_results"] = {
+                                        "report": report,
+                                        "config": config,
+                                        "strategy_name": use_custom["name"] if use_custom else sel_strategy,
+                                        "symbol": bt_symbol,
+                                        "start": str(bt_start),
+                                        "end": str(bt_end),
+                                    }
+
                                     # Display results
                                     st.subheader("Backtest Results")
-                                    r1, r2, r3, r4 = st.columns(4)
-                                    r1.metric("Total Trades", report.total_trades)
-                                    r2.metric("Win Rate", f"{report.win_rate}%")
-                                    r3.metric("Total P&L", f"INR {report.total_pnl:,.0f}")
-                                    r4.metric("Return", f"{report.return_pct}%")
-
-                                    r5, r6, r7, r8 = st.columns(4)
-                                    r5.metric("Avg P&L/Trade", f"INR {report.avg_pnl_per_trade:,.0f}")
-                                    r6.metric("Profit Factor", report.profit_factor)
-                                    r7.metric("Max Drawdown", f"INR {report.max_drawdown:,.0f}")
-                                    r8.metric("Sharpe Ratio", report.sharpe_ratio)
-
-                                    # Equity curve
-                                    if not report.equity_curve.empty:
-                                        eq_fig = go.Figure()
-                                        eq_fig.add_trace(go.Scatter(
-                                            x=report.equity_curve["date"],
-                                            y=report.equity_curve["equity"],
-                                            mode="lines", name="Equity",
-                                            line=dict(color="#42a5f5"),
-                                        ))
-                                        eq_fig.add_hline(y=config.initial_capital, line_dash="dash", line_color="white", opacity=0.5)
-                                        eq_fig.update_layout(
-                                            title="Equity Curve", height=400, template="plotly_dark",
-                                            yaxis_title="Capital (INR)",
-                                        )
-                                        st.plotly_chart(eq_fig, width="stretch")
-
-                                    # Trade log
-                                    if report.trades:
-                                        st.subheader("Trade Log")
-                                        trade_rows = []
-                                        for t in report.trades:
-                                            trade_rows.append({
-                                                "Entry": str(t.entry_date),
-                                                "Exit": str(t.exit_date),
-                                                "Strategy": t.strategy_name,
-                                                "Entry Premium": t.entry_premium,
-                                                "Exit Premium": t.exit_premium,
-                                                "P&L": t.pnl,
-                                                "P&L %": t.pnl_pct,
-                                                "Total P&L": t.total_pnl,
-                                                "DTE": t.dte_at_entry,
-                                            })
-                                        trade_df = pd.DataFrame(trade_rows)
-                                        st.dataframe(trade_df, width="stretch", hide_index=True)
+                                    _render_backtest_results(report, config)
             except ImportError as e:
                 st.caption(f"Backtest engine: {e}")
             except Exception as e:
@@ -826,6 +846,16 @@ OPEN_INT, CHG_IN_OI, TIMESTAMP
                     """,
                     unsafe_allow_html=True,
                 )
+
+        # Persist results across reruns (when button is not clicked)
+        elif "backtest_results" in st.session_state:
+            results = st.session_state["backtest_results"]
+            st.subheader(f"Backtest Results: {results['strategy_name']} on {results['symbol']}")
+            st.caption(f"Period: {results['start']} to {results['end']}")
+            _render_backtest_results(results["report"], results["config"])
+            if st.button("Clear Results", key="clear_results"):
+                del st.session_state["backtest_results"]
+                st.rerun()
 
     except ImportError as e:
         st.info(f"Backtester modules loading: {e}")

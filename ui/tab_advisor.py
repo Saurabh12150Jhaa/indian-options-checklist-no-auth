@@ -1,33 +1,73 @@
 """
 Market Advisor tab — day classification, strategy recommendations,
-and comprehensive JSON strategy import.
+historical analysis for any date, and comprehensive JSON strategy import.
 
-Brings together live market data (VIX, PCR, technicals) to classify
-the trading day and recommend appropriate strategies. Also provides
-a full JSON import for the comprehensive strategy format.
+Brings together live/historical market data (VIX, PCR, technicals) to
+classify any trading day and recommend appropriate strategies.
 """
 
 import json
 import logging
+from datetime import date as _date, timedelta as _td
 
-import streamlit as st
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
 from config import IST, INDEX_CONFIG, INDIA_VIX_TICKER
 
 logger = logging.getLogger(__name__)
 
+# ══════════════════════════════════════════════════════════════════════════
+#  SHARED HELPERS
+# ══════════════════════════════════════════════════════════════════════════
+
+_TYPE_COLORS = {
+    "trending": "#42a5f5", "range_bound": "#66bb6a",
+    "volatile": "#ef5350", "expiry": "#ffa726",
+}
+_TYPE_LABELS = {
+    "trending": "TRENDING", "range_bound": "RANGE-BOUND",
+    "volatile": "VOLATILE", "expiry": "EXPIRY DAY",
+}
+
+
+def _safe_fmt(val, fmt="{:.2f}", fallback="N/A"):
+    """Format a value safely, returning fallback for None/NaN."""
+    if val is None:
+        return fallback
+    try:
+        if pd.isna(val):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    try:
+        return fmt.format(val)
+    except (ValueError, TypeError):
+        return fallback
+
+
+def _render_regime_badge(day_class):
+    """Render the day-type badge with gradient background."""
+    color = _TYPE_COLORS.get(day_class.day_type, "#888")
+    label = _TYPE_LABELS.get(day_class.day_type, day_class.day_type.upper())
+    st.markdown(
+        f'<div style="background:linear-gradient(135deg, {color}22, {color}44); '
+        f'border:2px solid {color}; border-radius:12px; padding:20px; text-align:center; margin:10px 0;">'
+        f'<h2 style="color:{color}; margin:0;">{label}</h2>'
+        f'<p style="color:#ccc; margin:5px 0;">{day_class.summary}</p>'
+        f'<p style="color:#888; font-size:0.8rem;">Position size: '
+        f'{day_class.position_size_multiplier:.0%} of normal</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
 
 # ── Section 1: Market Regime Dashboard ────────────────────────────────────
 
 def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: str):
-    """Render the live market regime classification dashboard."""
-    st.subheader("Today's Market Regime")
-    st.caption(
-        "Analyses VIX, ADX, gap, CPR, PCR and expiry status to classify the day "
-        "and recommend strategies. Data refreshes with the sidebar refresh button."
-    )
-
+    """Render the market regime classification dashboard with optional date picker."""
     try:
         from core.market_regime import (
             VIXRegime, PCRRegime, GapAnalysis, CPRAnalysis,
@@ -35,9 +75,38 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
         )
     except ImportError as e:
         st.error(f"Market regime module not available: {e}")
-        return
+        return None
 
-    # ── Fetch live data ──
+    # ── Date selector ──
+    st.markdown("#### Select Analysis Date")
+    dc1, dc2, dc3 = st.columns([2, 1, 1])
+    with dc1:
+        use_today = st.toggle("Use today (live data)", value=True, key="regime_use_today")
+    with dc2:
+        if not use_today:
+            regime_date = st.date_input(
+                "Date",
+                value=_date.today() - _td(days=1),
+                max_value=_date.today(),
+                min_value=_date(2020, 1, 1),
+                key="regime_date",
+            )
+        else:
+            regime_date = _date.today()
+    with dc3:
+        st.caption(f"Analysing: **{regime_date}**")
+
+    # ── If historical date, use the historical analyzer ──
+    if not use_today:
+        return _render_regime_for_date(regime_date, selected_index, display_name)
+
+    # ── Live data path ──
+    st.subheader(f"Market Regime — {display_name}")
+    st.caption(
+        "Live VIX, ADX, gap, CPR, PCR and expiry status. "
+        "Refreshes with the sidebar refresh button."
+    )
+
     vix_value = 0.0
     pcr_value = 0.0
     adx_value = None
@@ -45,14 +114,19 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     cpr_analysis = None
     spot = 0.0
 
-    # VIX
+    # VIX — FIXED: fetch_india_vix returns tuple(float, datetime), NOT a dict
     try:
         from services.data_fetcher import fetch_india_vix
-        vix_data = fetch_india_vix()
-        if vix_data and "current" in vix_data:
-            vix_value = float(vix_data["current"])
-        elif vix_data and "close" in vix_data:
-            vix_value = float(vix_data["close"])
+        vix_result = fetch_india_vix()
+        if vix_result is not None:
+            if isinstance(vix_result, tuple):
+                vix_raw, _ = vix_result
+                if vix_raw is not None:
+                    vix_value = float(vix_raw)
+            elif isinstance(vix_result, (int, float)):
+                vix_value = float(vix_result)
+            elif isinstance(vix_result, dict):
+                vix_value = float(vix_result.get("current", vix_result.get("close", 0)))
     except Exception as e:
         logger.warning("Could not fetch VIX: %s", e)
 
@@ -77,11 +151,9 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
         ticker = idx_cfg.get("yf_ticker", "^NSEI")
         hist = fetch_historical_data(ticker, period="1mo", interval="1d")
         if hist is not None and len(hist) >= 15:
-            # ADX calculation
             high = hist["High"]
             low = hist["Low"]
             close = hist["Close"]
-            import numpy as np
             period = 14
             plus_dm = high.diff()
             minus_dm = -low.diff()
@@ -100,7 +172,6 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
             if not pd.isna(adx_val):
                 adx_value = float(adx_val)
 
-            # Gap analysis
             if len(hist) >= 2:
                 prev_close = float(hist["Close"].iloc[-2])
                 curr_open = float(hist["Open"].iloc[-1])
@@ -108,7 +179,6 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
                     spot = float(hist["Close"].iloc[-1])
                 gap_analysis = GapAnalysis.classify(prev_close, curr_open)
 
-            # CPR analysis
             if len(hist) >= 2:
                 prev_row = hist.iloc[-2]
                 cpr_analysis = CPRAnalysis.from_prev_day(
@@ -128,41 +198,16 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     )
 
     # ── Display regime ──
-    type_colors = {
-        "trending": "#42a5f5",
-        "range_bound": "#66bb6a",
-        "volatile": "#ef5350",
-        "expiry": "#ffa726",
-    }
-    type_icons = {
-        "trending": "TRENDING",
-        "range_bound": "RANGE-BOUND",
-        "volatile": "VOLATILE",
-        "expiry": "EXPIRY DAY",
-    }
-    color = type_colors.get(day_class.day_type, "#888")
-    icon = type_icons.get(day_class.day_type, day_class.day_type.upper())
-
-    st.markdown(
-        f'<div style="background:linear-gradient(135deg, {color}22, {color}44); '
-        f'border:2px solid {color}; border-radius:12px; padding:20px; text-align:center; margin:10px 0;">'
-        f'<h2 style="color:{color}; margin:0;">{icon}</h2>'
-        f'<p style="color:#ccc; margin:5px 0;">{day_class.summary}</p>'
-        f'<p style="color:#888; font-size:0.8rem;">Position size: {day_class.position_size_multiplier:.0%} of normal</p>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    _render_regime_badge(day_class)
 
     # Factor breakdown
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        vix_color = {"low": "green", "normal": "blue", "high": "orange", "extreme": "red"}.get(day_class.vix.level, "gray")
-        st.metric("India VIX", f"{vix_value:.1f}", delta=day_class.vix.level.upper())
+        st.metric("India VIX", _safe_fmt(vix_value, "{:.1f}"), delta=day_class.vix.level.upper())
     with m2:
-        pcr_color = "green" if day_class.pcr.bias == "bullish" else ("red" if day_class.pcr.bias == "bearish" else "gray")
-        st.metric("PCR", f"{pcr_value:.2f}", delta=day_class.pcr.bias.upper())
+        st.metric("PCR", _safe_fmt(pcr_value, "{:.2f}"), delta=day_class.pcr.bias.upper())
     with m3:
-        adx_str = f"{adx_value:.0f}" if adx_value else "N/A"
+        adx_str = _safe_fmt(adx_value, "{:.0f}")
         adx_delta = "Strong" if adx_value and adx_value > 25 else ("Weak" if adx_value and adx_value < 20 else "Moderate")
         st.metric("ADX", adx_str, delta=adx_delta)
     with m4:
@@ -187,14 +232,10 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     # ── Time context ──
     time_ctx = MarketTimeContext.now()
     phase_colors = {
-        "pre_market": "#78909c",
-        "opening_avoid": "#ef5350",
-        "first_trade": "#66bb6a",
-        "morning_prime": "#42a5f5",
-        "lunch_lull": "#ffa726",
-        "afternoon": "#42a5f5",
-        "exit_zone": "#ef5350",
-        "closed": "#78909c",
+        "pre_market": "#78909c", "opening_avoid": "#ef5350",
+        "first_trade": "#66bb6a", "morning_prime": "#42a5f5",
+        "lunch_lull": "#ffa726", "afternoon": "#42a5f5",
+        "exit_zone": "#ef5350", "closed": "#78909c",
     }
     pc = phase_colors.get(time_ctx.phase, "#888")
     st.markdown(
@@ -210,13 +251,86 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     return day_class
 
 
+def _render_regime_for_date(target_date: _date, selected_index: str, display_name: str):
+    """Render regime dashboard for a historical date using the historical analyzer."""
+    try:
+        from core.historical_analyzer import analyze_date
+    except ImportError as e:
+        st.error(f"Historical analyzer not available: {e}")
+        return None
+
+    # Use session_state to persist results across reruns
+    cache_key = f"regime_hist_{selected_index}_{target_date}"
+    if cache_key not in st.session_state:
+        with st.spinner(f"Fetching data for {target_date}..."):
+            st.session_state[cache_key] = analyze_date(target_date, selected_index)
+
+    analysis = st.session_state[cache_key]
+
+    if not analysis.has_ohlc:
+        st.warning(f"No trading data for {target_date}. This may be a holiday or weekend.")
+        return None
+
+    st.subheader(f"Market Regime — {display_name} on {target_date}")
+
+    if analysis.warnings:
+        for w in analysis.warnings:
+            st.caption(w)
+
+    day_class = analysis.day_classification
+    if day_class is None:
+        st.warning("Could not classify this day — insufficient data.")
+        return None
+
+    _render_regime_badge(day_class)
+
+    # Factor breakdown
+    tech = analysis.technical
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("India VIX", _safe_fmt(analysis.vix_value, "{:.1f}"),
+                   delta=day_class.vix.level.upper())
+    with m2:
+        pcr_val = analysis.options.pcr if analysis.options else 0.0
+        st.metric("PCR", _safe_fmt(pcr_val, "{:.2f}"), delta=day_class.pcr.bias.upper())
+    with m3:
+        adx_str = _safe_fmt(tech.adx if tech else None, "{:.0f}")
+        adx_delta = "Strong" if tech and tech.adx and tech.adx > 25 else (
+            "Weak" if tech and tech.adx and tech.adx < 20 else "Moderate")
+        st.metric("ADX", adx_str, delta=adx_delta)
+    with m4:
+        gap_str = f"{tech.gap_pct:+.1f}%" if tech and tech.gap_pct is not None else "N/A"
+        gap_dir = tech.gap_direction if tech and tech.gap_direction else "N/A"
+        st.metric("Gap", gap_str, delta=gap_dir)
+
+    with st.expander("Classification Factors", expanded=False):
+        for factor in day_class.factors:
+            st.markdown(f"- {factor}")
+
+    # Price summary
+    if tech:
+        with st.expander("Price & Indicators", expanded=False):
+            p1, p2, p3, p4 = st.columns(4)
+            change_pct = ((tech.day_close - tech.prev_close) / tech.prev_close * 100
+                          if tech.prev_close else 0)
+            p1.metric("Close", _safe_fmt(tech.day_close, "{:,.2f}"), f"{change_pct:+.2f}%")
+            p2.metric("RSI", _safe_fmt(tech.rsi_14, "{:.1f}"))
+            p3.metric("Supertrend", (tech.supertrend_direction or "N/A").title())
+            p4.metric("ATR %", _safe_fmt(tech.atr_pct, "{:.2f}%"))
+
+    if analysis.data_sources:
+        st.caption(f"Data: {', '.join(analysis.data_sources)}")
+
+    return day_class
+
+
 # ── Section 2: Strategy Recommendations ───────────────────────────────────
 
 def _render_recommendations(day_class):
     """Render strategy recommendations based on day classification."""
     st.subheader("Recommended Strategies")
     st.caption(
-        "Based on today's regime, these strategies have the highest probability "
+        "Based on the day's regime, these strategies have the highest probability "
         "of success. Click 'Load' to use one in the backtester."
     )
 
@@ -229,7 +343,7 @@ def _render_recommendations(day_class):
 
     recommendations = recommend_strategies(day_class)
     if not recommendations:
-        st.info("No specific recommendations for the current market regime.")
+        st.info("No specific recommendations for this market regime.")
         return
 
     for i, rec in enumerate(recommendations):
@@ -258,7 +372,7 @@ def _render_recommendations(day_class):
 
     # Risk context
     st.markdown("---")
-    st.markdown("#### Risk Parameters for Today")
+    st.markdown("#### Risk Parameters")
     from core.market_regime import RiskContext
     risk = RiskContext(
         capital=500000,
@@ -319,7 +433,6 @@ def _render_json_import():
             full_config, validation = load_strategy_from_json_string(json_text)
 
     if validation:
-        # Show validation results
         if validation.valid:
             st.success(
                 f"Valid JSON — {validation.strategies_found} strategies found, "
@@ -336,13 +449,11 @@ def _render_json_import():
                     st.markdown(f"- {w}")
 
     if full_config:
-        # Show summary
         st.markdown("---")
         st.markdown("### Strategy Overview")
         summary = summarize_strategy_config(full_config)
         st.markdown(summary)
 
-        # Show individual strategies with load buttons
         st.markdown("---")
         st.markdown("### Individual Strategies")
         st.caption(
@@ -357,10 +468,8 @@ def _render_json_import():
 
                 if strat.best_conditions:
                     st.markdown(f"Best conditions: {', '.join(strat.best_conditions)}")
-
                 if strat.entry_window:
                     st.markdown(f"Entry window: {strat.entry_window.start} - {strat.entry_window.end} IST")
-
                 if strat.exit_rules:
                     er = strat.exit_rules
                     st.markdown(
@@ -371,20 +480,17 @@ def _render_json_import():
                         st.markdown(f"Trailing stop: {er.trailing_stop}")
                     if er.partial_booking:
                         st.markdown(f"Partial booking: {er.partial_booking}")
-
                 if strat.adjustment_rules:
                     ar = strat.adjustment_rules
                     st.markdown(f"Adjustments: {ar.trigger}")
                     for action in ar.actions:
                         st.markdown(f"  - {action}")
-
                 if strat.position_sizing:
                     ps = strat.position_sizing
                     st.markdown(
                         f"Position sizing: Max {ps.max_lots} lots, "
                         f"{ps.max_capital_per_trade_pct}% capital/trade"
                     )
-
                 if strat.legs:
                     st.markdown("**Legs:**")
                     for leg in strat.legs:
@@ -393,7 +499,6 @@ def _render_json_import():
                             f"@ {leg.get('strike', 'ATM')} x{leg.get('lots', 1)}"
                         )
 
-                # Converted config
                 if strat.custom_strategy_config:
                     st.markdown("**Converted to backtester format:**")
                     config = strat.custom_strategy_config
@@ -417,7 +522,6 @@ def _render_json_import():
                             key=f"export_imported_{i}",
                         )
 
-                # Show limitations if relevant
                 limitations = []
                 if strat.entry_window:
                     limitations.append("Time-based entry windows (backtester uses daily data)")
@@ -459,7 +563,6 @@ def _render_json_import():
             if rm.no_averaging:
                 st.caption("No averaging losing positions | No doubling down")
 
-        # Greeks guidance
         if full_config.greeks_guidance:
             st.markdown("---")
             with st.expander("Greeks Guidance (Reference)", expanded=False):
@@ -471,7 +574,6 @@ def _render_json_import():
                     else:
                         st.markdown(f"  {guidance}")
 
-        # Day classification from imported config
         if full_config.day_classification:
             st.markdown("---")
             with st.expander("Imported Day Classification Rules", expanded=False):
@@ -488,14 +590,13 @@ def _render_json_import():
                         if avoid:
                             st.markdown(f"  Avoid: {', '.join(avoid)}")
 
-        # Store full config in session
         st.session_state["imported_full_config"] = full_config
 
 
-# ── Section 4: Historical Date Analysis ───────────────────────────────────
+# ── Section 4: Historical Date Analysis (Full Dashboard) ─────────────────
 
 def _render_historical_analysis(selected_index: str, display_name: str):
-    """Render analysis for any historical date using real data."""
+    """Render full analysis for any historical date using real data."""
     st.subheader("Analyse Any Date")
     st.caption(
         "Pick any historical trading date to see the full analysis — "
@@ -504,12 +605,10 @@ def _render_historical_analysis(selected_index: str, display_name: str):
     )
 
     try:
-        from core.historical_analyzer import analyze_date, get_available_analysis_dates
+        from core.historical_analyzer import analyze_date
     except ImportError as e:
         st.error(f"Historical analyzer not available: {e}")
         return
-
-    from datetime import date as _date, timedelta as _td
 
     # Date picker
     dc1, dc2 = st.columns([2, 1])
@@ -525,20 +624,25 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         st.markdown("<br>", unsafe_allow_html=True)
         run_analysis = st.button("Run Full Analysis", type="primary", key="run_hist_analysis")
 
-    if not run_analysis:
+    # Persist analysis results in session_state so they survive reruns
+    cache_key = f"hist_analysis_{selected_index}_{target_date}"
+
+    if run_analysis:
+        with st.spinner(f"Fetching real data for {target_date} ({display_name})..."):
+            st.session_state[cache_key] = analyze_date(target_date, selected_index)
+
+    if cache_key not in st.session_state:
         st.info("Select a date and click 'Run Full Analysis' to fetch real market data and compute all indicators.")
         return
 
-    # Run analysis
-    with st.spinner(f"Fetching real data for {target_date} ({display_name})..."):
-        analysis = analyze_date(target_date, selected_index)
+    analysis = st.session_state[cache_key]
 
     # ── Data Sources & Warnings ──
     src_cols = st.columns(3)
     with src_cols[0]:
         st.metric("OHLC Data", "Available" if analysis.has_ohlc else "Not Available")
     with src_cols[1]:
-        st.metric("India VIX", f"{analysis.vix_value:.1f}" if analysis.has_vix else "N/A")
+        st.metric("India VIX", _safe_fmt(analysis.vix_value, "{:.1f}") if analysis.has_vix else "N/A")
     with src_cols[2]:
         st.metric("Option Chain", "Available" if analysis.has_options else "Not Available")
 
@@ -558,59 +662,55 @@ def _render_historical_analysis(selected_index: str, display_name: str):
     tech = analysis.technical
     if tech:
         p1, p2, p3, p4, p5 = st.columns(5)
-        change = tech.day_close - tech.prev_close
-        change_pct = (change / tech.prev_close * 100) if tech.prev_close else 0
-        p1.metric("Close", f"{tech.day_close:,.2f}", f"{change_pct:+.2f}%")
-        p2.metric("Open", f"{tech.day_open:,.2f}")
-        p3.metric("High", f"{tech.day_high:,.2f}")
-        p4.metric("Low", f"{tech.day_low:,.2f}")
+        change_pct = ((tech.day_close - tech.prev_close) / tech.prev_close * 100
+                      if tech.prev_close else 0)
+        p1.metric("Close", _safe_fmt(tech.day_close, "{:,.2f}"), f"{change_pct:+.2f}%")
+        p2.metric("Open", _safe_fmt(tech.day_open, "{:,.2f}"))
+        p3.metric("High", _safe_fmt(tech.day_high, "{:,.2f}"))
+        p4.metric("Low", _safe_fmt(tech.day_low, "{:,.2f}"))
         p5.metric("Volume", f"{tech.volume:,}" if tech.volume else "N/A")
 
-        # Gap
         if tech.gap_pct is not None:
-            gap_str = f"{tech.gap_pct:+.2f}% ({tech.gap_direction})"
-            st.caption(f"Gap: {gap_str}")
+            st.caption(f"Gap: {tech.gap_pct:+.2f}% ({tech.gap_direction})")
 
     # ── Technical Indicators ──
     st.markdown("---")
     st.markdown("### Technical Indicators (Real Data)")
     if tech:
-        # EMAs
         st.markdown("**Moving Averages**")
         e1, e2, e3, e4 = st.columns(4)
-        e1.metric("EMA 9", f"{tech.ema_9:,.2f}" if tech.ema_9 else "N/A",
+        e1.metric("EMA 9", _safe_fmt(tech.ema_9, "{:,.2f}"),
                    delta="Above" if tech.ema_9 and tech.spot > tech.ema_9 else "Below")
-        e2.metric("EMA 20", f"{tech.ema_20:,.2f}" if tech.ema_20 else "N/A",
+        e2.metric("EMA 20", _safe_fmt(tech.ema_20, "{:,.2f}"),
                    delta="Above" if tech.ema_20 and tech.spot > tech.ema_20 else "Below")
-        e3.metric("EMA 50", f"{tech.ema_50:,.2f}" if tech.ema_50 else "N/A",
+        e3.metric("EMA 50", _safe_fmt(tech.ema_50, "{:,.2f}"),
                    delta="Above" if tech.ema_50 and tech.spot > tech.ema_50 else "Below")
-        e4.metric("EMA 200", f"{tech.ema_200:,.2f}" if tech.ema_200 else "N/A",
+        e4.metric("EMA 200", _safe_fmt(tech.ema_200, "{:,.2f}"),
                    delta="Above" if tech.ema_200 and tech.spot > tech.ema_200 else "Below")
 
-        # Momentum & Trend
         st.markdown("**Momentum & Trend**")
         t1, t2, t3, t4 = st.columns(4)
-        rsi_status = "Overbought" if tech.rsi_14 and tech.rsi_14 > 70 else ("Oversold" if tech.rsi_14 and tech.rsi_14 < 30 else "Neutral")
-        t1.metric("RSI(14)", f"{tech.rsi_14:.1f}" if tech.rsi_14 else "N/A", delta=rsi_status)
-        t2.metric("ADX(14)", f"{tech.adx:.1f}" if tech.adx else "N/A",
+        rsi_status = ("Overbought" if tech.rsi_14 and tech.rsi_14 > 70
+                      else ("Oversold" if tech.rsi_14 and tech.rsi_14 < 30 else "Neutral"))
+        t1.metric("RSI(14)", _safe_fmt(tech.rsi_14, "{:.1f}"), delta=rsi_status)
+        t2.metric("ADX(14)", _safe_fmt(tech.adx, "{:.1f}"),
                    delta="Trending" if tech.adx and tech.adx > 25 else "Range-Bound")
-        t3.metric("MACD", f"{tech.macd_line:.2f}" if tech.macd_line is not None else "N/A",
+        t3.metric("MACD", _safe_fmt(tech.macd_line, "{:.2f}"),
                    delta=f"Hist: {tech.macd_histogram:+.2f}" if tech.macd_histogram is not None else "")
-        t4.metric("Supertrend", tech.supertrend_direction.title() if tech.supertrend_direction else "N/A")
+        t4.metric("Supertrend", (tech.supertrend_direction or "N/A").title())
 
-        # Volatility
         st.markdown("**Volatility**")
         v1, v2, v3, v4 = st.columns(4)
-        v1.metric("ATR(14)", f"{tech.atr_14:.2f}" if tech.atr_14 else "N/A")
-        v2.metric("ATR %", f"{tech.atr_pct:.2f}%" if tech.atr_pct else "N/A")
-        v3.metric("BB Width", f"{tech.bb_width_pct:.2f}%" if tech.bb_width_pct else "N/A")
+        v1.metric("ATR(14)", _safe_fmt(tech.atr_14, "{:.2f}"))
+        v2.metric("ATR %", _safe_fmt(tech.atr_pct, "{:.2f}%"))
+        v3.metric("BB Width", _safe_fmt(tech.bb_width_pct, "{:.2f}%"))
         squeeze = "Yes" if tech.bb_width_pct and tech.bb_width_pct < 4 else "No"
         v4.metric("BB Squeeze", squeeze)
 
-        # Bollinger Bands
         if tech.bb_upper:
-            bb_pos = "Above Upper" if tech.spot > tech.bb_upper else (
-                "Below Lower" if tech.spot < tech.bb_lower else "Within Bands")
+            bb_pos = ("Above Upper" if tech.spot > tech.bb_upper
+                      else ("Below Lower" if tech.bb_lower and tech.spot < tech.bb_lower
+                            else "Within Bands"))
             st.caption(
                 f"Bollinger: {tech.bb_lower:,.0f} — {tech.bb_middle:,.0f} — {tech.bb_upper:,.0f} | "
                 f"Price: {bb_pos}"
@@ -619,7 +719,8 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         # VIX
         st.markdown("**Volatility Index**")
         vx1, vx2, vx3 = st.columns(3)
-        vx1.metric("India VIX", f"{analysis.vix_value:.2f}" if analysis.has_vix else "N/A",
+        vx1.metric("India VIX",
+                     _safe_fmt(analysis.vix_value, "{:.2f}") if analysis.has_vix else "N/A",
                      delta=f"{analysis.vix_change_pct:+.1f}% vs prev" if analysis.vix_change_pct else "")
         from core.market_regime import VIXRegime
         vix_regime = VIXRegime.classify(analysis.vix_value)
@@ -627,15 +728,14 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         vx3.metric("Sizing", f"{vix_regime.position_size_multiplier:.0%} of normal")
         st.caption(vix_regime.action)
 
-        # Pivots
         if tech.pivot:
             st.markdown("**Pivot Levels (from previous day)**")
             pv1, pv2, pv3, pv4, pv5 = st.columns(5)
-            pv1.metric("S2", f"{tech.s2:,.0f}")
-            pv2.metric("S1", f"{tech.s1:,.0f}")
-            pv3.metric("Pivot", f"{tech.pivot:,.0f}")
-            pv4.metric("R1", f"{tech.r1:,.0f}")
-            pv5.metric("R2", f"{tech.r2:,.0f}")
+            pv1.metric("S2", _safe_fmt(tech.s2, "{:,.0f}"))
+            pv2.metric("S1", _safe_fmt(tech.s1, "{:,.0f}"))
+            pv3.metric("Pivot", _safe_fmt(tech.pivot, "{:,.0f}"))
+            pv4.metric("R1", _safe_fmt(tech.r1, "{:,.0f}"))
+            pv5.metric("R2", _safe_fmt(tech.r2, "{:,.0f}"))
 
     # ── Options Analytics ──
     if analysis.has_options and analysis.options:
@@ -645,10 +745,10 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         o1, o2, o3, o4 = st.columns(4)
         from core.market_regime import PCRRegime
         pcr_regime = PCRRegime.classify(opts.pcr)
-        o1.metric("PCR", f"{opts.pcr:.2f}", delta=pcr_regime.bias.upper())
-        o2.metric("Max Pain", f"{opts.max_pain:,.0f}" if opts.max_pain else "N/A")
-        o3.metric("Highest Call OI", f"{opts.highest_call_oi_strike:,.0f}" if opts.highest_call_oi_strike else "N/A")
-        o4.metric("Highest Put OI", f"{opts.highest_put_oi_strike:,.0f}" if opts.highest_put_oi_strike else "N/A")
+        o1.metric("PCR", _safe_fmt(opts.pcr, "{:.2f}"), delta=pcr_regime.bias.upper())
+        o2.metric("Max Pain", _safe_fmt(opts.max_pain, "{:,.0f}"))
+        o3.metric("Highest Call OI", _safe_fmt(opts.highest_call_oi_strike, "{:,.0f}"))
+        o4.metric("Highest Put OI", _safe_fmt(opts.highest_put_oi_strike, "{:,.0f}"))
 
         o5, o6, o7, o8 = st.columns(4)
         o5.metric("Total Call OI", f"{opts.total_call_oi:,}")
@@ -667,32 +767,12 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         st.markdown("---")
         st.markdown("### Day Classification")
         day_class = analysis.day_classification
-
-        type_colors = {
-            "trending": "#42a5f5", "range_bound": "#66bb6a",
-            "volatile": "#ef5350", "expiry": "#ffa726",
-        }
-        type_labels = {
-            "trending": "TRENDING", "range_bound": "RANGE-BOUND",
-            "volatile": "VOLATILE", "expiry": "EXPIRY DAY",
-        }
-        color = type_colors.get(day_class.day_type, "#888")
-        label = type_labels.get(day_class.day_type, day_class.day_type.upper())
-
-        st.markdown(
-            f'<div style="background:linear-gradient(135deg, {color}22, {color}44); '
-            f'border:2px solid {color}; border-radius:12px; padding:16px; text-align:center;">'
-            f'<h3 style="color:{color}; margin:0;">{label}</h3>'
-            f'<p style="color:#ccc; margin:4px 0;">{day_class.summary}</p>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        _render_regime_badge(day_class)
 
         with st.expander("Classification Factors", expanded=True):
             for f in day_class.factors:
                 st.markdown(f"- {f}")
 
-        # Strategy recommendations
         if analysis.recommendations:
             st.markdown("---")
             st.markdown("### Recommended Strategies for This Day")
@@ -702,7 +782,6 @@ def _render_historical_analysis(selected_index: str, display_name: str):
     if analysis.has_ohlc and analysis.ohlc_df is not None:
         st.markdown("---")
         st.markdown("### Price History (last 30 days)")
-        import plotly.graph_objects as go
         chart_data = analysis.ohlc_df.tail(30)
         fig = go.Figure(data=[go.Candlestick(
             x=[str(d) for d in chart_data["date"]],
@@ -711,13 +790,11 @@ def _render_historical_analysis(selected_index: str, display_name: str):
             name=display_name,
         )])
         if tech and tech.ema_20:
-            # Add EMA20 line on last 30 points
             ema20 = chart_data["close"].ewm(span=20, adjust=False).mean()
             fig.add_trace(go.Scatter(
                 x=[str(d) for d in chart_data["date"]], y=ema20,
                 mode="lines", name="EMA 20", line=dict(color="#ffa726", width=1),
             ))
-        # Mark target date
         fig.add_vline(x=str(target_date), line_dash="dot", line_color="yellow", opacity=0.5)
         fig.update_layout(
             height=400, template="plotly_dark",
@@ -741,10 +818,9 @@ def render(selected_index: str, display_name: str, timeframe: str = "15m") -> No
         "gap analysis, and CPR data from yfinance and bhavcopy."
     )
 
-    # Tabs within the advisor
     advisor_tabs = st.tabs([
-        "Live Regime",
-        "Analyse Any Date",
+        "Regime & Advice",
+        "Full Date Analysis",
         "Import Strategy JSON",
     ])
 
