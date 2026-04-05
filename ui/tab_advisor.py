@@ -492,6 +492,241 @@ def _render_json_import():
         st.session_state["imported_full_config"] = full_config
 
 
+# ── Section 4: Historical Date Analysis ───────────────────────────────────
+
+def _render_historical_analysis(selected_index: str, display_name: str):
+    """Render analysis for any historical date using real data."""
+    st.subheader("Analyse Any Date")
+    st.caption(
+        "Pick any historical trading date to see the full analysis — "
+        "real OHLC from yfinance, VIX, option chain from bhavcopy, "
+        "all technical indicators, day classification, and strategy recommendations."
+    )
+
+    try:
+        from core.historical_analyzer import analyze_date, get_available_analysis_dates
+    except ImportError as e:
+        st.error(f"Historical analyzer not available: {e}")
+        return
+
+    from datetime import date as _date, timedelta as _td
+
+    # Date picker
+    dc1, dc2 = st.columns([2, 1])
+    with dc1:
+        target_date = st.date_input(
+            "Select Date",
+            value=_date.today() - _td(days=1),
+            max_value=_date.today(),
+            min_value=_date(2020, 1, 1),
+            key="hist_date",
+        )
+    with dc2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        run_analysis = st.button("Run Full Analysis", type="primary", key="run_hist_analysis")
+
+    if not run_analysis:
+        st.info("Select a date and click 'Run Full Analysis' to fetch real market data and compute all indicators.")
+        return
+
+    # Run analysis
+    with st.spinner(f"Fetching real data for {target_date} ({display_name})..."):
+        analysis = analyze_date(target_date, selected_index)
+
+    # ── Data Sources & Warnings ──
+    src_cols = st.columns(3)
+    with src_cols[0]:
+        st.metric("OHLC Data", "Available" if analysis.has_ohlc else "Not Available")
+    with src_cols[1]:
+        st.metric("India VIX", f"{analysis.vix_value:.1f}" if analysis.has_vix else "N/A")
+    with src_cols[2]:
+        st.metric("Option Chain", "Available" if analysis.has_options else "Not Available")
+
+    if analysis.data_sources:
+        st.caption(f"Data from: {', '.join(analysis.data_sources)}")
+    if analysis.warnings:
+        for w in analysis.warnings:
+            st.warning(w)
+
+    if not analysis.has_ohlc:
+        st.error(f"No trading data for {target_date}. This may be a holiday or weekend.")
+        return
+
+    # ── Price Action ──
+    st.markdown("---")
+    st.markdown(f"### Price Action — {display_name} on {target_date}")
+    tech = analysis.technical
+    if tech:
+        p1, p2, p3, p4, p5 = st.columns(5)
+        change = tech.day_close - tech.prev_close
+        change_pct = (change / tech.prev_close * 100) if tech.prev_close else 0
+        p1.metric("Close", f"{tech.day_close:,.2f}", f"{change_pct:+.2f}%")
+        p2.metric("Open", f"{tech.day_open:,.2f}")
+        p3.metric("High", f"{tech.day_high:,.2f}")
+        p4.metric("Low", f"{tech.day_low:,.2f}")
+        p5.metric("Volume", f"{tech.volume:,}" if tech.volume else "N/A")
+
+        # Gap
+        if tech.gap_pct is not None:
+            gap_str = f"{tech.gap_pct:+.2f}% ({tech.gap_direction})"
+            st.caption(f"Gap: {gap_str}")
+
+    # ── Technical Indicators ──
+    st.markdown("---")
+    st.markdown("### Technical Indicators (Real Data)")
+    if tech:
+        # EMAs
+        st.markdown("**Moving Averages**")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("EMA 9", f"{tech.ema_9:,.2f}" if tech.ema_9 else "N/A",
+                   delta="Above" if tech.ema_9 and tech.spot > tech.ema_9 else "Below")
+        e2.metric("EMA 20", f"{tech.ema_20:,.2f}" if tech.ema_20 else "N/A",
+                   delta="Above" if tech.ema_20 and tech.spot > tech.ema_20 else "Below")
+        e3.metric("EMA 50", f"{tech.ema_50:,.2f}" if tech.ema_50 else "N/A",
+                   delta="Above" if tech.ema_50 and tech.spot > tech.ema_50 else "Below")
+        e4.metric("EMA 200", f"{tech.ema_200:,.2f}" if tech.ema_200 else "N/A",
+                   delta="Above" if tech.ema_200 and tech.spot > tech.ema_200 else "Below")
+
+        # Momentum & Trend
+        st.markdown("**Momentum & Trend**")
+        t1, t2, t3, t4 = st.columns(4)
+        rsi_status = "Overbought" if tech.rsi_14 and tech.rsi_14 > 70 else ("Oversold" if tech.rsi_14 and tech.rsi_14 < 30 else "Neutral")
+        t1.metric("RSI(14)", f"{tech.rsi_14:.1f}" if tech.rsi_14 else "N/A", delta=rsi_status)
+        t2.metric("ADX(14)", f"{tech.adx:.1f}" if tech.adx else "N/A",
+                   delta="Trending" if tech.adx and tech.adx > 25 else "Range-Bound")
+        t3.metric("MACD", f"{tech.macd_line:.2f}" if tech.macd_line is not None else "N/A",
+                   delta=f"Hist: {tech.macd_histogram:+.2f}" if tech.macd_histogram is not None else "")
+        t4.metric("Supertrend", tech.supertrend_direction.title() if tech.supertrend_direction else "N/A")
+
+        # Volatility
+        st.markdown("**Volatility**")
+        v1, v2, v3, v4 = st.columns(4)
+        v1.metric("ATR(14)", f"{tech.atr_14:.2f}" if tech.atr_14 else "N/A")
+        v2.metric("ATR %", f"{tech.atr_pct:.2f}%" if tech.atr_pct else "N/A")
+        v3.metric("BB Width", f"{tech.bb_width_pct:.2f}%" if tech.bb_width_pct else "N/A")
+        squeeze = "Yes" if tech.bb_width_pct and tech.bb_width_pct < 4 else "No"
+        v4.metric("BB Squeeze", squeeze)
+
+        # Bollinger Bands
+        if tech.bb_upper:
+            bb_pos = "Above Upper" if tech.spot > tech.bb_upper else (
+                "Below Lower" if tech.spot < tech.bb_lower else "Within Bands")
+            st.caption(
+                f"Bollinger: {tech.bb_lower:,.0f} — {tech.bb_middle:,.0f} — {tech.bb_upper:,.0f} | "
+                f"Price: {bb_pos}"
+            )
+
+        # VIX
+        st.markdown("**Volatility Index**")
+        vx1, vx2, vx3 = st.columns(3)
+        vx1.metric("India VIX", f"{analysis.vix_value:.2f}" if analysis.has_vix else "N/A",
+                     delta=f"{analysis.vix_change_pct:+.1f}% vs prev" if analysis.vix_change_pct else "")
+        from core.market_regime import VIXRegime
+        vix_regime = VIXRegime.classify(analysis.vix_value)
+        vx2.metric("VIX Level", vix_regime.level.upper())
+        vx3.metric("Sizing", f"{vix_regime.position_size_multiplier:.0%} of normal")
+        st.caption(vix_regime.action)
+
+        # Pivots
+        if tech.pivot:
+            st.markdown("**Pivot Levels (from previous day)**")
+            pv1, pv2, pv3, pv4, pv5 = st.columns(5)
+            pv1.metric("S2", f"{tech.s2:,.0f}")
+            pv2.metric("S1", f"{tech.s1:,.0f}")
+            pv3.metric("Pivot", f"{tech.pivot:,.0f}")
+            pv4.metric("R1", f"{tech.r1:,.0f}")
+            pv5.metric("R2", f"{tech.r2:,.0f}")
+
+    # ── Options Analytics ──
+    if analysis.has_options and analysis.options:
+        st.markdown("---")
+        st.markdown("### Options Analytics (Bhavcopy Data)")
+        opts = analysis.options
+        o1, o2, o3, o4 = st.columns(4)
+        from core.market_regime import PCRRegime
+        pcr_regime = PCRRegime.classify(opts.pcr)
+        o1.metric("PCR", f"{opts.pcr:.2f}", delta=pcr_regime.bias.upper())
+        o2.metric("Max Pain", f"{opts.max_pain:,.0f}" if opts.max_pain else "N/A")
+        o3.metric("Highest Call OI", f"{opts.highest_call_oi_strike:,.0f}" if opts.highest_call_oi_strike else "N/A")
+        o4.metric("Highest Put OI", f"{opts.highest_put_oi_strike:,.0f}" if opts.highest_put_oi_strike else "N/A")
+
+        o5, o6, o7, o8 = st.columns(4)
+        o5.metric("Total Call OI", f"{opts.total_call_oi:,}")
+        o6.metric("Total Put OI", f"{opts.total_put_oi:,}")
+        o7.metric("Call OI Chg", f"{opts.total_call_chg_oi:+,}")
+        o8.metric("Put OI Chg", f"{opts.total_put_chg_oi:+,}")
+
+        if opts.oi_buildup:
+            st.caption(f"OI Buildup: {opts.oi_buildup.replace('_', ' ').title()}")
+        st.caption(pcr_regime.interpretation)
+        if opts.nearest_expiry:
+            st.caption(f"Nearest expiry: {opts.nearest_expiry} | {opts.num_expiries} expiries available")
+
+    # ── Day Classification ──
+    if analysis.day_classification:
+        st.markdown("---")
+        st.markdown("### Day Classification")
+        day_class = analysis.day_classification
+
+        type_colors = {
+            "trending": "#42a5f5", "range_bound": "#66bb6a",
+            "volatile": "#ef5350", "expiry": "#ffa726",
+        }
+        type_labels = {
+            "trending": "TRENDING", "range_bound": "RANGE-BOUND",
+            "volatile": "VOLATILE", "expiry": "EXPIRY DAY",
+        }
+        color = type_colors.get(day_class.day_type, "#888")
+        label = type_labels.get(day_class.day_type, day_class.day_type.upper())
+
+        st.markdown(
+            f'<div style="background:linear-gradient(135deg, {color}22, {color}44); '
+            f'border:2px solid {color}; border-radius:12px; padding:16px; text-align:center;">'
+            f'<h3 style="color:{color}; margin:0;">{label}</h3>'
+            f'<p style="color:#ccc; margin:4px 0;">{day_class.summary}</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Classification Factors", expanded=True):
+            for f in day_class.factors:
+                st.markdown(f"- {f}")
+
+        # Strategy recommendations
+        if analysis.recommendations:
+            st.markdown("---")
+            st.markdown("### Recommended Strategies for This Day")
+            _render_recommendations(day_class)
+
+    # ── OHLC Chart ──
+    if analysis.has_ohlc and analysis.ohlc_df is not None:
+        st.markdown("---")
+        st.markdown("### Price History (last 30 days)")
+        import plotly.graph_objects as go
+        chart_data = analysis.ohlc_df.tail(30)
+        fig = go.Figure(data=[go.Candlestick(
+            x=[str(d) for d in chart_data["date"]],
+            open=chart_data["open"], high=chart_data["high"],
+            low=chart_data["low"], close=chart_data["close"],
+            name=display_name,
+        )])
+        if tech and tech.ema_20:
+            # Add EMA20 line on last 30 points
+            ema20 = chart_data["close"].ewm(span=20, adjust=False).mean()
+            fig.add_trace(go.Scatter(
+                x=[str(d) for d in chart_data["date"]], y=ema20,
+                mode="lines", name="EMA 20", line=dict(color="#ffa726", width=1),
+            ))
+        # Mark target date
+        fig.add_vline(x=str(target_date), line_dash="dot", line_color="yellow", opacity=0.5)
+        fig.update_layout(
+            height=400, template="plotly_dark",
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=40, r=20, t=30, b=30),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  MAIN RENDER
 # ══════════════════════════════════════════════════════════════════════════
@@ -501,14 +736,15 @@ def render(selected_index: str, display_name: str, timeframe: str = "15m") -> No
     """Render the Market Advisor tab."""
     st.header("Market Advisor")
     st.caption(
-        "AI-powered day classification, strategy recommendations, "
-        "and comprehensive strategy import. Uses live VIX, PCR, ADX, "
-        "gap analysis, and CPR to determine the market regime."
+        "Day classification, strategy recommendations, historical analysis, "
+        "and comprehensive strategy import. Uses real VIX, PCR, ADX, "
+        "gap analysis, and CPR data from yfinance and bhavcopy."
     )
 
     # Tabs within the advisor
     advisor_tabs = st.tabs([
-        "Today's Regime & Recommendations",
+        "Live Regime",
+        "Analyse Any Date",
         "Import Strategy JSON",
     ])
 
@@ -519,4 +755,7 @@ def render(selected_index: str, display_name: str, timeframe: str = "15m") -> No
             _render_recommendations(day_class)
 
     with advisor_tabs[1]:
+        _render_historical_analysis(selected_index, display_name)
+
+    with advisor_tabs[2]:
         _render_json_import()
