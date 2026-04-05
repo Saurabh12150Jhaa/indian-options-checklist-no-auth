@@ -330,7 +330,7 @@ with tab_checklist:
         )
 
         # 2) EMA overlays
-        from analysis import _ema
+        from analysis import _ema, _rsi, _macd
         ema_colours = {9: "#fdd835", 20: "#42a5f5", 50: "#ab47bc", 200: "#ef6c00"}
         for period in [9, 20, 50, 200]:
             ema_series = _ema(chart_df["close"], length=period)
@@ -381,7 +381,7 @@ with tab_checklist:
                     )
 
         # 5) RSI subplot
-        rsi_series = _ta.rsi(chart_df["close"], length=14)
+        rsi_series = _rsi(chart_df["close"], length=14)
         if rsi_series is not None and not rsi_series.dropna().empty:
             tech_fig.add_trace(
                 go.Scatter(x=chart_df.index, y=rsi_series, mode="lines", name="RSI",
@@ -393,32 +393,25 @@ with tab_checklist:
             tech_fig.add_hrect(y0=30, y1=70, fillcolor="#fdd835", opacity=0.05, row=2, col=1)
 
         # 6) MACD subplot
-        macd_result = _ta.macd(chart_df["close"], fast=12, slow=26, signal=9)
+        macd_result = _macd(chart_df["close"], fast=12, slow=26, signal=9)
         if macd_result is not None and not macd_result.dropna().empty:
-            macd_col = [c for c in macd_result.columns if c.startswith("MACD_") and not c.startswith("MACDs") and not c.startswith("MACDh")]
-            signal_col = [c for c in macd_result.columns if c.startswith("MACDs")]
-            hist_col = [c for c in macd_result.columns if c.startswith("MACDh")]
-
-            if macd_col:
-                tech_fig.add_trace(
-                    go.Scatter(x=chart_df.index, y=macd_result[macd_col[0]], mode="lines",
-                               name="MACD", line=dict(color="#42a5f5", width=1.2)),
-                    row=3, col=1,
-                )
-            if signal_col:
-                tech_fig.add_trace(
-                    go.Scatter(x=chart_df.index, y=macd_result[signal_col[0]], mode="lines",
-                               name="Signal", line=dict(color="#ef6c00", width=1.2)),
-                    row=3, col=1,
-                )
-            if hist_col:
-                hist_vals = macd_result[hist_col[0]]
-                colours = ["#66bb6a" if v >= 0 else "#ef5350" for v in hist_vals]
-                tech_fig.add_trace(
-                    go.Bar(x=chart_df.index, y=hist_vals, name="Histogram",
-                           marker_color=colours, opacity=0.6),
-                    row=3, col=1,
-                )
+            tech_fig.add_trace(
+                go.Scatter(x=chart_df.index, y=macd_result["macd"], mode="lines",
+                           name="MACD", line=dict(color="#42a5f5", width=1.2)),
+                row=3, col=1,
+            )
+            tech_fig.add_trace(
+                go.Scatter(x=chart_df.index, y=macd_result["signal"], mode="lines",
+                           name="Signal", line=dict(color="#ef6c00", width=1.2)),
+                row=3, col=1,
+            )
+            hist_vals = macd_result["histogram"]
+            colours = ["#66bb6a" if v >= 0 else "#ef5350" for v in hist_vals]
+            tech_fig.add_trace(
+                go.Bar(x=chart_df.index, y=hist_vals, name="Histogram",
+                       marker_color=colours, opacity=0.6),
+                row=3, col=1,
+            )
 
         # Layout
         tech_fig.update_layout(
