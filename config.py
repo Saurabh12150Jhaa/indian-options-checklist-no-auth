@@ -3,8 +3,26 @@ Configuration for the Indian Options Pre-Trade Checklist.
 No API keys required – uses only free public data sources.
 """
 
+import os
+import ssl
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
+
+# ── SSL / Zscaler proxy fix ───────────────────────────────────────────────
+# Detect the system OpenSSL cert bundle (which includes any corporate CA
+# roots injected by Zscaler / other TLS-inspecting proxies) and make sure
+# *every* HTTP library in the process honours it.
+_SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE") or os.environ.get(
+    "REQUESTS_CA_BUNDLE"
+)
+if not _SSL_CERT_FILE:
+    _default = ssl.get_default_verify_paths().cafile
+    if _default and os.path.isfile(_default):
+        _SSL_CERT_FILE = _default
+if _SSL_CERT_FILE:
+    os.environ.setdefault("SSL_CERT_FILE", _SSL_CERT_FILE)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _SSL_CERT_FILE)
+    os.environ.setdefault("CURL_CA_BUNDLE", _SSL_CERT_FILE)
 
 # ── Timezone ───────────────────────────────────────────────────────────────
 IST = ZoneInfo("Asia/Kolkata")
@@ -17,7 +35,8 @@ PRE_MARKET_OPEN = dtime(9, 0)
 # ── NSE endpoints ─────────────────────────────────────────────────────────
 NSE_BASE_URL = "https://www.nseindia.com"
 NSE_OPTION_CHAIN_URL = NSE_BASE_URL + "/api/option-chain-indices?symbol={symbol}"
-NSE_FII_DII_URL = NSE_BASE_URL + "/api/fiidiiActivity"
+NSE_FII_DII_URL = NSE_BASE_URL + "/api/fiidiiTradeReact"
+NSE_ALL_INDICES_URL = NSE_BASE_URL + "/api/allIndices"
 NSE_MARKET_STATUS_URL = NSE_BASE_URL + "/api/marketStatus"
 
 # ── Index definitions ─────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ Data fetching module – zero-auth, free public APIs only.
 
 Sources:
   - yfinance : Global indices, India VIX, index spot prices, historical candles
-  - NSE API  : Option chain (OI, IV, greeks), FII/DII activity
+  - NSE API  : Option chain (OI, IV, greeks), FII/DII activity, VIX fallback
 """
 
 import logging
@@ -19,6 +19,7 @@ from config import (
     GLOBAL_TICKERS,
     NSE_OPTION_CHAIN_URL,
     NSE_FII_DII_URL,
+    NSE_ALL_INDICES_URL,
     IST,
 )
 from nse_client import get_nse_client
@@ -55,16 +56,30 @@ def fetch_global_cues() -> tuple[pd.DataFrame, datetime]:
 
 
 def fetch_india_vix() -> tuple[Optional[float], datetime]:
-    """Fetch India VIX latest value."""
+    """Fetch India VIX latest value. Tries yfinance first, then NSE allIndices."""
+    # Primary: yfinance
     try:
         tk = yf.Ticker(INDIA_VIX_TICKER)
         hist = tk.history(period="5d")
-        if hist.empty:
-            return None, datetime.now(IST)
-        return round(float(hist["Close"].iloc[-1]), 2), datetime.now(IST)
+        if not hist.empty:
+            return round(float(hist["Close"].iloc[-1]), 2), datetime.now(IST)
     except Exception as exc:
-        logger.warning("India VIX fetch failed: %s", exc)
-        return None, datetime.now(IST)
+        logger.warning("India VIX (yfinance) failed: %s", exc)
+
+    # Fallback: NSE allIndices
+    try:
+        client = get_nse_client()
+        data = client.get(NSE_ALL_INDICES_URL)
+        if data:
+            for item in data.get("data", []):
+                if "VIX" in (item.get("index") or "").upper():
+                    val = item.get("last")
+                    if val is not None:
+                        return round(float(val), 2), datetime.now(IST)
+    except Exception as exc:
+        logger.warning("India VIX (NSE) failed: %s", exc)
+
+    return None, datetime.now(IST)
 
 
 def fetch_spot_data(index_name: str) -> tuple[Optional[dict], datetime]:
@@ -141,6 +156,8 @@ def fetch_nse_option_chain(index_name: str) -> tuple[Optional[dict], datetime]:
       { "records": { "data": [...], "expiryDates": [...],
                      "strikePrices": [...], "underlyingValue": ... },
         "filtered": { "data": [...], "CE": {...}, "PE": {...} } }
+
+    Note: NSE returns {} on non-trading days / outside market hours.
     """
     cfg = INDEX_CONFIG.get(index_name)
     if not cfg:
@@ -149,20 +166,26 @@ def fetch_nse_option_chain(index_name: str) -> tuple[Optional[dict], datetime]:
     url = NSE_OPTION_CHAIN_URL.format(symbol=cfg["nse_symbol"])
     client = get_nse_client()
     data = client.get(url)
-    if data:
+    # Treat empty dict as "no data"
+    if data and data.get("records"):
         return data, datetime.now(IST)
     return None, datetime.now(IST)
 
 
 def fetch_fii_dii() -> tuple[Optional[pd.DataFrame], datetime]:
-    """Fetch FII/DII cash-market activity from NSE."""
+    """Fetch FII/DII cash-market activity from NSE (fiidiiTradeReact)."""
     client = get_nse_client()
     data = client.get(NSE_FII_DII_URL)
     if not data:
         return None, datetime.now(IST)
     try:
+        # fiidiiTradeReact returns a list of category dicts
+        items = data if isinstance(data, list) else data.get("data", data)
+        if not isinstance(items, list):
+            return None, datetime.now(IST)
+
         records = []
-        for entry in data:
+        for entry in items:
             records.append({
                 "Category": entry.get("category", ""),
                 "Date": entry.get("date", ""),
