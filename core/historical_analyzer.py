@@ -788,6 +788,21 @@ def analyze_date(
         pcr_value = analysis.options.pcr if analysis.options else 0.0
         adx_value = analysis.technical.adx if analysis.technical else None
 
+        # Compute hard-data inputs for classification
+        tech = analysis.technical
+        day_range_pct = None
+        day_change_pct = None
+        rsi_value = None
+        atr_pct_val = None
+
+        if tech:
+            if tech.day_close and tech.day_close > 0:
+                day_range_pct = (tech.day_high - tech.day_low) / tech.day_close * 100
+            if tech.prev_close and tech.prev_close > 0:
+                day_change_pct = (tech.day_close - tech.prev_close) / tech.prev_close * 100
+            rsi_value = tech.rsi_14
+            atr_pct_val = tech.atr_pct
+
         analysis.day_classification = classify_day(
             vix_value=analysis.vix_value,
             pcr_value=pcr_value,
@@ -795,6 +810,10 @@ def analyze_date(
             gap_analysis=gap,
             cpr_analysis=cpr,
             today=target_date,
+            day_range_pct=day_range_pct,
+            day_change_pct=day_change_pct,
+            rsi_value=rsi_value,
+            atr_pct=atr_pct_val,
         )
 
         analysis.recommendations = recommend_strategies(analysis.day_classification)

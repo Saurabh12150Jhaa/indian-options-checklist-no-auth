@@ -219,10 +219,32 @@ def classify_day(
     orb_analysis: Optional[ORBAnalysis] = None,
     cpr_analysis: Optional[CPRAnalysis] = None,
     today: Optional[date] = None,
+    day_range_pct: Optional[float] = None,
+    day_change_pct: Optional[float] = None,
+    rsi_value: Optional[float] = None,
+    atr_pct: Optional[float] = None,
 ) -> DayClassification:
     """
     Classify the trading day based on available market data.
-    Uses a weighted scoring system across multiple factors.
+
+    Uses a weighted scoring system where:
+    - Each factor votes for one or more day types
+    - Confidence = best_score / (best_score + second_best_score)
+      so it measures *separation* between the top two, not diluted by all four
+    - Additional hard data (day range, % change) can override weaker signals
+
+    Args:
+        vix_value: India VIX (0 if unavailable)
+        pcr_value: Put-Call Ratio (0 if unavailable — will be ignored)
+        adx_value: ADX(14) trend strength
+        gap_analysis: Opening gap classification
+        orb_analysis: Opening Range Breakout analysis
+        cpr_analysis: Central Pivot Range
+        today: Date to classify (defaults to today)
+        day_range_pct: (High - Low) / Close * 100 — actual intraday range
+        day_change_pct: (Close - PrevClose) / PrevClose * 100 — daily return
+        rsi_value: RSI(14) — momentum/oversold/overbought
+        atr_pct: ATR(14) as % of close — recent volatility context
     """
     if today is None:
         today = date.today()
@@ -233,81 +255,172 @@ def classify_day(
     # Check if it's expiry day
     weekday = today.weekday()  # 0=Mon ... 4=Fri
     is_thursday = weekday == 3
-    # Monthly expiry = last Thursday of the month
     import calendar
     _, last_day = calendar.monthrange(today.year, today.month)
     last_date = date(today.year, today.month, last_day)
     while last_date.weekday() != 3:
-        last_date = last_date - pd.Timedelta(days=1) if hasattr(pd, 'Timedelta') else date(today.year, today.month, last_day)
         last_day -= 1
         last_date = date(today.year, today.month, last_day)
     is_monthly_expiry = today == last_date
     is_weekly_expiry = is_thursday and not is_monthly_expiry
 
-    # Scoring: each day type gets points
+    # ── Scoring: each factor adds to one or more day types ──
     scores = {"trending": 0.0, "range_bound": 0.0, "volatile": 0.0, "expiry": 0.0}
     factors = []
 
-    # Factor 1: VIX
+    # Factor 1: VIX (weight: 2-3)
     if vix.level == "low":
         scores["range_bound"] += 2.0
         factors.append(f"VIX {vix_value:.1f} (low) — favours range-bound / premium selling")
     elif vix.level == "normal":
         scores["trending"] += 1.0
         scores["range_bound"] += 1.0
-        factors.append(f"VIX {vix_value:.1f} (normal) — both directional and neutral strategies viable")
+        factors.append(f"VIX {vix_value:.1f} (normal) — both directional and neutral viable")
     elif vix.level == "high":
-        scores["volatile"] += 2.0
-        scores["trending"] += 1.0
+        scores["volatile"] += 2.5
+        scores["trending"] += 1.5
         factors.append(f"VIX {vix_value:.1f} (high) — volatility elevated, directional moves likely")
     elif vix.level == "extreme":
-        scores["volatile"] += 3.0
-        factors.append(f"VIX {vix_value:.1f} (extreme) — very high fear, reduce size, hedge everything")
+        scores["volatile"] += 4.0
+        scores["trending"] += 1.0
+        factors.append(f"VIX {vix_value:.1f} (extreme) — very high fear, hedge everything")
 
-    # Factor 2: ADX
+    # Factor 2: ADX (weight: 2.5-3)
     if adx_value is not None:
-        if adx_value > 25:
+        if adx_value > 30:
+            scores["trending"] += 3.0
+            factors.append(f"ADX {adx_value:.0f} (>30) — very strong trend")
+        elif adx_value > 25:
             scores["trending"] += 2.5
             factors.append(f"ADX {adx_value:.0f} (>25) — strong trend detected")
-        elif adx_value < 20:
-            scores["range_bound"] += 2.5
-            factors.append(f"ADX {adx_value:.0f} (<20) — no clear trend, range-bound")
+        elif adx_value < 18:
+            scores["range_bound"] += 3.0
+            factors.append(f"ADX {adx_value:.0f} (<18) — no trend, range-bound")
+        elif adx_value < 22:
+            scores["range_bound"] += 1.5
+            factors.append(f"ADX {adx_value:.0f} — weak trend, likely range-bound")
         else:
             scores["trending"] += 0.5
             scores["range_bound"] += 0.5
             factors.append(f"ADX {adx_value:.0f} — borderline trend strength")
 
-    # Factor 3: Gap
+    # Factor 3: Gap (weight: 2-4 — gaps are very strong signals)
     if gap_analysis:
-        if gap_analysis.magnitude in ("medium", "large"):
-            scores["trending"] += 2.0
-            scores["volatile"] += 1.0
-            factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — strong directional open")
-        elif gap_analysis.direction == "flat":
+        abs_gap = abs(gap_analysis.gap_pct)
+        if abs_gap >= 2.0:
+            scores["volatile"] += 3.0
+            scores["trending"] += 3.0
+            factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
+                           f"massive gap, highly directional/volatile open")
+        elif abs_gap >= 1.0:
+            scores["trending"] += 2.5
+            scores["volatile"] += 1.5
+            factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
+                           f"large gap, strong directional open")
+        elif abs_gap >= 0.5:
+            scores["trending"] += 1.5
+            factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
+                           f"moderate gap")
+        elif abs_gap < 0.2:
             scores["range_bound"] += 1.0
             factors.append("Flat open — no gap bias")
 
     # Factor 4: ORB
     if orb_analysis:
         if orb_analysis.assessment == "wide":
-            scores["trending"] += 1.5
-            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (wide) — trending day signal")
+            scores["trending"] += 2.0
+            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (wide) — trending signal")
         elif orb_analysis.assessment == "narrow":
-            scores["range_bound"] += 1.5
-            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (narrow) — potential consolidation")
+            scores["range_bound"] += 2.0
+            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (narrow) — consolidation")
         else:
             factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (normal)")
 
-    # Factor 5: CPR
+    # Factor 5: CPR (weight: 1.5 — confirmatory, should NOT override strong signals)
     if cpr_analysis:
         if cpr_analysis.is_narrow:
             scores["trending"] += 1.5
-            factors.append(f"Narrow CPR ({cpr_analysis.cpr_width_pct:.2f}%) — trending day expected")
+            factors.append(f"Narrow CPR ({cpr_analysis.cpr_width_pct:.2f}%) — trending signal")
         else:
-            scores["range_bound"] += 1.0
-            factors.append(f"Wide CPR ({cpr_analysis.cpr_width_pct:.2f}%) — range-bound expected")
+            scores["range_bound"] += 0.5  # reduced from 1.0 — wide CPR is weak signal
+            factors.append(f"CPR width {cpr_analysis.cpr_width_pct:.2f}%")
 
-    # Factor 6: Expiry
+    # Factor 6: PCR (weight: 1-2 — only when data is available)
+    if pcr_value > 0:
+        if pcr_value > 1.3:
+            scores["trending"] += 1.5  # heavy put writing = bullish support
+            factors.append(f"PCR {pcr_value:.2f} (>1.3) — strong put writing, bullish underpinning")
+        elif pcr_value < 0.7:
+            scores["trending"] += 1.0  # low PCR can mean bearish trend
+            scores["volatile"] += 0.5
+            factors.append(f"PCR {pcr_value:.2f} (<0.7) — bearish, calls dominate")
+        else:
+            scores["range_bound"] += 0.5
+            factors.append(f"PCR {pcr_value:.2f} — neutral")
+
+    # Factor 7: Actual day range (weight: 3-5 — HARD DATA, strongest signal)
+    if day_range_pct is not None:
+        if day_range_pct >= 3.0:
+            scores["volatile"] += 5.0
+            scores["trending"] += 3.0
+            factors.append(f"Day range {day_range_pct:.1f}% — extreme intraday swing")
+        elif day_range_pct >= 2.0:
+            scores["volatile"] += 3.0
+            scores["trending"] += 2.0
+            factors.append(f"Day range {day_range_pct:.1f}% — very wide range")
+        elif day_range_pct >= 1.2:
+            scores["trending"] += 2.5
+            factors.append(f"Day range {day_range_pct:.1f}% — above-average movement")
+        elif day_range_pct < 0.5:
+            scores["range_bound"] += 3.0
+            factors.append(f"Day range {day_range_pct:.1f}% — very narrow, range-bound")
+        elif day_range_pct < 0.8:
+            scores["range_bound"] += 1.5
+            factors.append(f"Day range {day_range_pct:.1f}% — below-average movement")
+
+    # Factor 8: Daily change (weight: 2-4 — HARD DATA)
+    if day_change_pct is not None:
+        abs_change = abs(day_change_pct)
+        if abs_change >= 3.0:
+            scores["volatile"] += 4.0
+            scores["trending"] += 3.0
+            factors.append(f"Day change {day_change_pct:+.1f}% — extreme move")
+        elif abs_change >= 1.5:
+            scores["trending"] += 3.0
+            scores["volatile"] += 1.0
+            factors.append(f"Day change {day_change_pct:+.1f}% — strong directional move")
+        elif abs_change >= 0.8:
+            scores["trending"] += 2.0
+            factors.append(f"Day change {day_change_pct:+.1f}% — clear directional day")
+        elif abs_change < 0.2:
+            scores["range_bound"] += 2.0
+            factors.append(f"Day change {day_change_pct:+.1f}% — unchanged, range-bound")
+
+    # Factor 9: RSI (weight: 1 — supplementary)
+    if rsi_value is not None:
+        if rsi_value > 75:
+            scores["trending"] += 1.0
+            factors.append(f"RSI {rsi_value:.0f} — overbought, strong uptrend")
+        elif rsi_value < 25:
+            scores["trending"] += 1.0
+            factors.append(f"RSI {rsi_value:.0f} — oversold, strong downtrend")
+        elif 40 <= rsi_value <= 60:
+            scores["range_bound"] += 0.5
+            factors.append(f"RSI {rsi_value:.0f} — neutral")
+
+    # Factor 10: ATR % (weight: 1-2 — recent volatility baseline)
+    if atr_pct is not None:
+        if atr_pct >= 2.0:
+            scores["volatile"] += 2.0
+            factors.append(f"ATR {atr_pct:.1f}% — market in high-volatility regime")
+        elif atr_pct >= 1.2:
+            scores["trending"] += 1.0
+            factors.append(f"ATR {atr_pct:.1f}% — elevated volatility")
+        elif atr_pct < 0.6:
+            scores["range_bound"] += 1.0
+            factors.append(f"ATR {atr_pct:.1f}% — low volatility regime")
+
+    # Factor 11: Expiry (weight: 3-4 — can override but only IF it's actually expiry)
     if is_monthly_expiry:
         scores["expiry"] += 4.0
         factors.append("Monthly expiry day — max theta decay + gamma risk")
@@ -315,10 +428,36 @@ def classify_day(
         scores["expiry"] += 3.0
         factors.append("Weekly expiry day — elevated theta decay")
 
-    # Determine winner
-    best_type = max(scores, key=scores.get)
-    total_score = sum(scores.values())
-    confidence = scores[best_type] / total_score if total_score > 0 else 0.5
+    # ── Determine winner with proper confidence ──
+    sorted_types = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    best_type = sorted_types[0][0]
+    best_score = sorted_types[0][1]
+    second_type = sorted_types[1][0] if len(sorted_types) > 1 else ""
+    second_score = sorted_types[1][1] if len(sorted_types) > 1 else 0.0
+    third_score = sorted_types[2][1] if len(sorted_types) > 2 else 0.0
+
+    # Confidence = how much the winner dominates the runner-up
+    if best_score + second_score > 0:
+        confidence = best_score / (best_score + second_score)
+    else:
+        confidence = 0.5
+
+    # Synergy boost: "trending" and "volatile" are NOT contradictory — a crash is
+    # both trending and volatile. When these two dominate and the rest is negligible,
+    # the classification is actually very certain (just debating which label).
+    # Boost confidence using margin over the THIRD place instead.
+    synergy_pairs = {("trending", "volatile"), ("volatile", "trending")}
+    if (best_type, second_type) in synergy_pairs and best_score > 5 and second_score > 5:
+        # Both trending and volatile are strong — use margin over 3rd place
+        if best_score + second_score > 0 and third_score >= 0:
+            # Confidence = how much the top TWO dominate the rest
+            combined = best_score + second_score
+            synergy_conf = combined / (combined + third_score) if (combined + third_score) > 0 else 0.8
+            # Use the higher of the two confidence measures
+            confidence = max(confidence, synergy_conf * 0.95)  # scale slightly under 1.0
+
+    # Floor confidence at 50% (random) and cap at 97%
+    confidence = max(0.5, min(0.97, confidence))
 
     # Position size multiplier
     pos_mult = vix.position_size_multiplier
@@ -590,21 +729,31 @@ STRATEGY_DATABASE = {
 def recommend_strategies(day: DayClassification) -> list[StrategyRecommendation]:
     """Get strategy recommendations for the classified day."""
     primary = STRATEGY_DATABASE.get(day.day_type, [])
-    # Also include one strategy from the secondary type if confidence isn't high
     result = list(primary)
-    if day.confidence < 0.6:
-        # Find second-best type
+
+    # Also include one strategy from the secondary type if confidence isn't high
+    if day.confidence < 0.65:
+        # Use the actual scores from the classification rather than parsing factor strings
+        # Factor strings contain hyphens ("range-bound") while keys use underscores ("range_bound")
+        # so keyword matching is unreliable. Instead, infer the secondary type by looking at
+        # which day types got mentioned most in the factors, mapping both forms.
+        type_keywords = {
+            "trending": ["trending", "trend", "directional", "momentum", "breakout"],
+            "range_bound": ["range-bound", "range_bound", "sideways", "consolidation", "narrow"],
+            "volatile": ["volatile", "volatility", "extreme", "fear", "wild", "swing"],
+            "expiry": ["expiry", "theta", "gamma"],
+        }
         scores = {t: 0 for t in DAY_TYPES}
-        for f in day.factors:
-            for t in DAY_TYPES:
-                if t in f.lower():
-                    scores[t] += 1
+        factor_text = " ".join(day.factors).lower()
+        for day_type, keywords in type_keywords.items():
+            for kw in keywords:
+                scores[day_type] += factor_text.count(kw)
         # Exclude primary
         scores[day.day_type] = -1
         secondary_type = max(scores, key=scores.get)
         secondary = STRATEGY_DATABASE.get(secondary_type, [])
         if secondary:
-            result.append(secondary[0])  # Add the top pick from secondary
+            result.append(secondary[0])
     return result
 
 

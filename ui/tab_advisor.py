@@ -103,7 +103,7 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     # ── Live data path ──
     st.subheader(f"Market Regime — {display_name}")
     st.caption(
-        "Live VIX, ADX, gap, CPR, PCR and expiry status. "
+        "VIX, ADX, gap, CPR, PCR, RSI, ATR and expiry status. "
         "Refreshes with the sidebar refresh button."
     )
 
@@ -113,8 +113,12 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     gap_analysis = None
     cpr_analysis = None
     spot = 0.0
+    day_range_pct = None
+    day_change_pct = None
+    rsi_value = None
+    atr_pct = None
 
-    # VIX — FIXED: fetch_india_vix returns tuple(float, datetime), NOT a dict
+    # VIX — fetch_india_vix returns tuple(Optional[float], datetime)
     try:
         from services.data_fetcher import fetch_india_vix
         vix_result = fetch_india_vix()
@@ -125,35 +129,36 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
                     vix_value = float(vix_raw)
             elif isinstance(vix_result, (int, float)):
                 vix_value = float(vix_result)
-            elif isinstance(vix_result, dict):
-                vix_value = float(vix_result.get("current", vix_result.get("close", 0)))
     except Exception as e:
         logger.warning("Could not fetch VIX: %s", e)
 
-    # Option chain for PCR
+    # Option chain for PCR — fetch_nse_option_chain returns tuple(Optional[dict], datetime)
     try:
-        from services.data_fetcher import fetch_option_chain
+        from services.data_fetcher import fetch_nse_option_chain
         from analysis.options import parse_nse_option_chain, compute_pcr, get_underlying_value
-        raw_chain = fetch_option_chain(selected_index)
+        chain_result = fetch_nse_option_chain(selected_index)
+        raw_chain = chain_result[0] if isinstance(chain_result, tuple) else chain_result
         if raw_chain:
-            chain_df, meta = parse_nse_option_chain(raw_chain)
+            chain_df = parse_nse_option_chain(raw_chain)
             spot = get_underlying_value(raw_chain) or 0.0
-            pcr_result = compute_pcr(chain_df)
-            if pcr_result and "pcr" in pcr_result:
-                pcr_value = float(pcr_result["pcr"])
+            pcr_result = compute_pcr(chain_df)  # returns Optional[float], NOT a dict
+            if pcr_result is not None:
+                pcr_value = float(pcr_result)
     except Exception as e:
         logger.warning("Could not fetch option chain for PCR: %s", e)
 
-    # Technical data for ADX, gap, CPR
+    # Technical data — fetch_historical returns tuple(Optional[DataFrame], datetime)
+    # with LOWERCASE columns (open, high, low, close, volume)
     try:
-        from services.data_fetcher import fetch_historical_data
-        idx_cfg = INDEX_CONFIG.get(selected_index, {})
-        ticker = idx_cfg.get("yf_ticker", "^NSEI")
-        hist = fetch_historical_data(ticker, period="1mo", interval="1d")
+        from services.data_fetcher import fetch_historical
+        hist_result = fetch_historical(selected_index, period="2mo")
+        hist = hist_result[0] if isinstance(hist_result, tuple) else hist_result
         if hist is not None and len(hist) >= 15:
-            high = hist["High"]
-            low = hist["Low"]
-            close = hist["Close"]
+            high = hist["high"]
+            low = hist["low"]
+            close = hist["close"]
+
+            # ADX calculation
             period = 14
             plus_dm = high.diff()
             minus_dm = -low.diff()
@@ -163,27 +168,53 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
             hc = (high - close.shift(1)).abs()
             lc = (low - close.shift(1)).abs()
             tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-            atr = tr.ewm(alpha=1/period, adjust=False).mean()
-            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
-            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+            atr_series = tr.ewm(alpha=1/period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_series)
+            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_series)
             dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
             adx_series = dx.ewm(alpha=1/period, adjust=False).mean()
             adx_val = adx_series.iloc[-1]
             if not pd.isna(adx_val):
                 adx_value = float(adx_val)
 
+            # RSI calculation
+            delta = close.diff()
+            gain = delta.clip(lower=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+            loss = (-delta.clip(upper=0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi_series = 100 - (100 / (1 + rs))
+            rsi_val = rsi_series.iloc[-1]
+            if not pd.isna(rsi_val):
+                rsi_value = float(rsi_val)
+
+            # ATR %
+            atr_val = atr_series.iloc[-1]
+            last_close = float(close.iloc[-1])
+            if not pd.isna(atr_val) and last_close > 0:
+                atr_pct = float(atr_val / last_close * 100)
+
+            # Day range % and change %
+            today_row = hist.iloc[-1]
+            day_high = float(today_row["high"])
+            day_low = float(today_row["low"])
+            day_close = float(today_row["close"])
+            if day_close > 0:
+                day_range_pct = (day_high - day_low) / day_close * 100
+
             if len(hist) >= 2:
-                prev_close = float(hist["Close"].iloc[-2])
-                curr_open = float(hist["Open"].iloc[-1])
+                prev_close_val = float(hist["close"].iloc[-2])
+                curr_open = float(hist["open"].iloc[-1])
                 if spot <= 0:
-                    spot = float(hist["Close"].iloc[-1])
-                gap_analysis = GapAnalysis.classify(prev_close, curr_open)
+                    spot = day_close
+                gap_analysis = GapAnalysis.classify(prev_close_val, curr_open)
+                if prev_close_val > 0:
+                    day_change_pct = (day_close - prev_close_val) / prev_close_val * 100
 
             if len(hist) >= 2:
                 prev_row = hist.iloc[-2]
                 cpr_analysis = CPRAnalysis.from_prev_day(
-                    float(prev_row["High"]), float(prev_row["Low"]),
-                    float(prev_row["Close"]), spot,
+                    float(prev_row["high"]), float(prev_row["low"]),
+                    float(prev_row["close"]), spot,
                 )
     except Exception as e:
         logger.warning("Could not fetch historical data: %s", e)
@@ -195,6 +226,10 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
         adx_value=adx_value,
         gap_analysis=gap_analysis,
         cpr_analysis=cpr_analysis,
+        day_range_pct=day_range_pct,
+        day_change_pct=day_change_pct,
+        rsi_value=rsi_value,
+        atr_pct=atr_pct,
     )
 
     # ── Display regime ──
