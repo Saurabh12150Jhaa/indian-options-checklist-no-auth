@@ -83,6 +83,7 @@ st.markdown(
     .phase-market_open { background: #2e7d32; color: white; }
     .phase-post_market { background: #616161; color: white; }
     div[data-testid="stMetric"] { background: #1e1e2f; border-radius: 10px; padding: 12px; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
     """,
     unsafe_allow_html=True,
@@ -178,7 +179,7 @@ def _fii_dii():
     return fetch_fii_dii()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _news(idx):
     return fetch_news(idx)
 
@@ -509,18 +510,32 @@ with st.spinner("Fetching market news..."):
     news_df, news_ts = _news(selected_index)
 
 if news_df is not None and not news_df.empty:
-    # Category filter
-    categories = ["All"] + sorted(news_df["Category"].unique().tolist())
-    sel_cat = st.selectbox("Filter by Category", categories, index=0, key="news_cat")
-    filtered = news_df if sel_cat == "All" else news_df[news_df["Category"] == sel_cat]
+    # Filters row
+    nf1, nf2 = st.columns(2)
+    with nf1:
+        categories = ["All"] + sorted(news_df["Category"].unique().tolist())
+        sel_cat = st.selectbox("Filter by Category", categories, index=0, key="news_cat")
+    with nf2:
+        sent_opts = ["All", "Positive", "Negative", "Neutral"]
+        sel_sent = st.selectbox("Filter by Sentiment", sent_opts, index=0, key="news_sent")
 
-    # Sentiment summary
-    ns1, ns2, ns3, ns4 = st.columns(4)
+    filtered = news_df.copy()
+    if sel_cat != "All":
+        filtered = filtered[filtered["Category"] == sel_cat]
+    if sel_sent != "All":
+        filtered = filtered[filtered["Sentiment"] == sel_sent]
+    # Already sorted newest-first via PublishedDT in the fetcher
+
+    # Counts
+    live_count = int(filtered["IsLive"].sum())
     total = len(filtered)
-    pos_count = (filtered["Sentiment"] == "Positive").sum()
-    neg_count = (filtered["Sentiment"] == "Negative").sum()
-    neu_count = (filtered["Sentiment"] == "Neutral").sum()
-    ns1.metric("Total Articles", total)
+    pos_count = int((filtered["Sentiment"] == "Positive").sum())
+    neg_count = int((filtered["Sentiment"] == "Negative").sum())
+    neu_count = int((filtered["Sentiment"] == "Neutral").sum())
+
+    ns0, ns1, ns2, ns3, ns4 = st.columns(5)
+    ns0.metric("LIVE", live_count)
+    ns1.metric("Total", total)
     ns2.metric("Positive", pos_count)
     ns3.metric("Negative", neg_count)
     ns4.metric("Neutral", neu_count)
@@ -530,7 +545,7 @@ if news_df is not None and not news_df.empty:
         sent_fig = go.Figure(data=[
             go.Pie(
                 labels=["Positive", "Negative", "Neutral"],
-                values=[int(pos_count), int(neg_count), int(neu_count)],
+                values=[pos_count, neg_count, neu_count],
                 marker=dict(colors=["#66bb6a", "#ef5350", "#fdd835"]),
                 hole=0.4,
             )
@@ -541,7 +556,7 @@ if news_df is not None and not news_df.empty:
         )
         st.plotly_chart(sent_fig, use_container_width=True)
 
-    # News cards
+    # News cards – newest first (already sorted by PublishedDT desc)
     for _, row in filtered.iterrows():
         sent_color = {"Positive": "#66bb6a", "Negative": "#ef5350"}.get(row["Sentiment"], "#fdd835")
         cat_color = {
@@ -552,14 +567,23 @@ if news_df is not None and not news_df.empty:
             "Technical": "#5c6bc0",
         }.get(row["Category"], "#78909c")
 
+        live_badge = (
+            '<span style="background:#e53935; color:white; padding:2px 8px; '
+            'border-radius:10px; font-size:0.7rem; font-weight:700; '
+            'animation:pulse 1.5s infinite;">LIVE</span> '
+            if row.get("IsLive") else ""
+        )
+        time_ago_str = row.get("TimeAgo", "")
+
         st.markdown(
             f'<div style="border-left: 4px solid {sent_color}; padding: 8px 14px; margin: 6px 0; '
             f'background: #1e1e2f; border-radius: 4px;">'
+            f'{live_badge}'
             f'<span style="background:{cat_color}; color:white; padding:2px 8px; border-radius:10px; '
             f'font-size:0.75rem; font-weight:600;">{row["Category"]}</span> &nbsp; '
             f'<span style="color:{sent_color}; font-weight:700; font-size:0.8rem;">'
             f'{row["Sentiment"].upper()}</span> &nbsp; '
-            f'<span style="color:#888; font-size:0.75rem;">{row["Published"]}</span>'
+            f'<span style="color:#aaa; font-size:0.75rem; font-weight:600;">{time_ago_str}</span>'
             f'<br/><a href="{row["Link"]}" target="_blank" style="color:#e0e0e0; '
             f'text-decoration:none; font-weight:600;">{row["Title"]}</a>'
             + (f'<br/><span style="color:#aaa; font-size:0.85rem;">{row["Summary"]}</span>' if row["Summary"] else "")

@@ -8,9 +8,10 @@ Sources:
   - Google News (index-specific options / F&O queries)
 """
 
+import calendar
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import feedparser
@@ -100,6 +101,57 @@ def _sentiment(title: str, summary: str) -> str:
     return "Neutral"
 
 
+# ── Date helpers ──────────────────────────────────────────────────────────
+
+
+def _parse_pub_date(entry: dict) -> datetime:
+    """
+    Convert feedparser's ``published_parsed`` (a UTC time.struct_time)
+    into a timezone-aware ``datetime`` in IST.
+
+    Falls back to ``datetime.now(IST)`` when parsing fails so that
+    articles without a date don't break sorting.
+    """
+    pp = entry.get("published_parsed") or entry.get("updated_parsed")
+    if pp:
+        try:
+            utc_dt = datetime(*pp[:6], tzinfo=timezone.utc)
+            return utc_dt.astimezone(IST)
+        except Exception:
+            pass
+    return datetime.now(IST)
+
+
+def time_ago(dt: datetime) -> str:
+    """Human-readable 'time ago' string relative to now (IST)."""
+    now = datetime.now(IST)
+    diff = now - dt
+    secs = int(diff.total_seconds())
+    if secs < 0:
+        return "just now"
+    if secs < 60:
+        return f"{secs}s ago"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days == 1:
+        return "1 day ago"
+    if days < 7:
+        return f"{days} days ago"
+    return dt.strftime("%d %b %Y")
+
+
+def is_live(dt: datetime, threshold_hours: int = 2) -> bool:
+    """Return True if the article was published within *threshold_hours*."""
+    now = datetime.now(IST)
+    diff = now - dt
+    return diff.total_seconds() < threshold_hours * 3600
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 
@@ -111,7 +163,10 @@ def fetch_news(
     Fetch and classify market news relevant to *index_name*.
 
     Returns a DataFrame with columns:
-        Source, Category, Title, Summary, Sentiment, Published, Link
+        Source, Category, Title, Summary, Sentiment,
+        Published (str), PublishedDT (datetime), TimeAgo (str),
+        IsLive (bool), Link
+    sorted by PublishedDT descending (newest first).
     """
     all_items: list[dict] = []
 
@@ -149,7 +204,8 @@ def fetch_news(
     df = pd.DataFrame(all_items)
     # De-duplicate by title (different sources may carry the same story)
     df.drop_duplicates(subset="Title", keep="first", inplace=True)
-    df.sort_values("Published", ascending=False, inplace=True)
+    # Sort newest-first using the parsed datetime column
+    df.sort_values("PublishedDT", ascending=False, inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df.head(max_items), datetime.now(IST)
 
@@ -157,7 +213,7 @@ def fetch_news(
 def _parse_entry(entry: dict, source: str) -> dict:
     title = entry.get("title", "")
     summary = _clean_html(entry.get("summary", entry.get("description", "")))
-    published = entry.get("published", "")
+    published_raw = entry.get("published", "")
     link = entry.get("link", "")
     # Google News embeds the actual source in a <source> element
     if hasattr(entry, "source") and isinstance(entry.source, dict):
@@ -165,13 +221,18 @@ def _parse_entry(entry: dict, source: str) -> dict:
     elif "source" in entry and isinstance(entry["source"], dict):
         source = entry["source"].get("title", source)
 
+    pub_dt = _parse_pub_date(entry)
+
     return {
         "Source": source,
         "Category": _classify(title, summary),
         "Title": title,
         "Summary": summary[:200] if summary else "",
         "Sentiment": _sentiment(title, summary),
-        "Published": published,
+        "Published": published_raw,
+        "PublishedDT": pub_dt,
+        "TimeAgo": time_ago(pub_dt),
+        "IsLive": is_live(pub_dt),
         "Link": link,
     }
 
