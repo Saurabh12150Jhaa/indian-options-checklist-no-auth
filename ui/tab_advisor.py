@@ -17,6 +17,14 @@ import streamlit as st
 
 from config import IST, INDEX_CONFIG, INDIA_VIX_TICKER
 
+# Pre-import analysis.options at module level to avoid Streamlit reloader issues
+# (lazy import inside function bodies can fail with "'analysis' is not a package")
+try:
+    from analysis.options import parse_nse_option_chain, compute_pcr, get_underlying_value
+    _HAS_ANALYSIS_OPTIONS = True
+except ImportError:
+    _HAS_ANALYSIS_OPTIONS = False
+
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -24,12 +32,12 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════════
 
 _TYPE_COLORS = {
-    "trending": "#42a5f5", "range_bound": "#66bb6a",
-    "volatile": "#ef5350", "expiry": "#ffa726",
+    "trending_up": "#42a5f5", "trending_down": "#e57373",
+    "sideways": "#66bb6a", "volatile": "#ef5350", "expiry": "#ffa726",
 }
 _TYPE_LABELS = {
-    "trending": "TRENDING", "range_bound": "RANGE-BOUND",
-    "volatile": "VOLATILE", "expiry": "EXPIRY DAY",
+    "trending_up": "TRENDING UP", "trending_down": "TRENDING DOWN",
+    "sideways": "SIDEWAYS", "volatile": "VOLATILE", "expiry": "EXPIRY DAY",
 }
 
 
@@ -52,12 +60,19 @@ def _render_regime_badge(day_class):
     """Render the day-type badge with gradient background."""
     color = _TYPE_COLORS.get(day_class.day_type, "#888")
     label = _TYPE_LABELS.get(day_class.day_type, day_class.day_type.upper())
+    dir_label = getattr(day_class, "direction", "neutral")
+    dir_icon = {"bullish": "&#9650;", "bearish": "&#9660;"}.get(dir_label, "&#9654;")
+    dir_color = {"bullish": "#66bb6a", "bearish": "#ef5350"}.get(dir_label, "#aaa")
     st.markdown(
         f'<div style="background:linear-gradient(135deg, {color}22, {color}44); '
-        f'border:2px solid {color}; border-radius:12px; padding:20px; text-align:center; margin:10px 0;">'
-        f'<h2 style="color:{color}; margin:0;">{label}</h2>'
-        f'<p style="color:#ccc; margin:5px 0;">{day_class.summary}</p>'
-        f'<p style="color:#888; font-size:0.8rem;">Position size: '
+        f'border:2px solid {color}; border-radius:12px; padding:clamp(12px,3vw,20px); '
+        f'text-align:center; margin:10px 0;">'
+        f'<h2 style="color:{color}; margin:0; font-size:clamp(1.1rem,3.5vw,1.8rem);">{label}</h2>'
+        f'<p style="color:{dir_color}; margin:4px 0; font-size:clamp(0.8rem,2.5vw,1rem);">'
+        f'{dir_icon} Direction: {dir_label.title()}</p>'
+        f'<p style="color:#ccc; margin:3px 0; font-size:clamp(0.7rem,2vw,0.9rem);">'
+        f'{day_class.summary}</p>'
+        f'<p style="color:#888; font-size:clamp(0.65rem,1.8vw,0.8rem);">Position size: '
         f'{day_class.position_size_multiplier:.0%} of normal</p>'
         f'</div>',
         unsafe_allow_html=True,
@@ -135,7 +150,8 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
     # Option chain for PCR — fetch_nse_option_chain returns tuple(Optional[dict], datetime)
     try:
         from services.data_fetcher import fetch_nse_option_chain
-        from analysis.options import parse_nse_option_chain, compute_pcr, get_underlying_value
+        if not _HAS_ANALYSIS_OPTIONS:
+            raise ImportError("analysis.options not available")
         chain_result = fetch_nse_option_chain(selected_index)
         raw_chain = chain_result[0] if isinstance(chain_result, tuple) else chain_result
         if raw_chain:
@@ -261,7 +277,7 @@ def _render_regime_dashboard(selected_index: str, display_name: str, timeframe: 
             lvl1.metric("Pivot", f"{cpr_analysis.pivot:,.0f}")
             lvl2.metric("R1 / S1", f"{cpr_analysis.r1:,.0f} / {cpr_analysis.s1:,.0f}")
             lvl3.metric("R2 / S2", f"{cpr_analysis.r2:,.0f} / {cpr_analysis.s2:,.0f}")
-            narrow_str = "Narrow (trending day signal)" if cpr_analysis.is_narrow else "Wide (range-bound signal)"
+            narrow_str = "Narrow (trending day signal)" if cpr_analysis.is_narrow else "Wide (sideways signal)"
             st.caption(f"CPR Width: {cpr_analysis.cpr_width_pct:.3f}% — {narrow_str}")
 
     # ── Time context ──
@@ -744,7 +760,7 @@ def _render_historical_analysis(selected_index: str, display_name: str):
                       else ("Oversold" if tech.rsi_14 and tech.rsi_14 < 30 else "Neutral"))
         t1.metric("RSI(14)", _safe_fmt(tech.rsi_14, "{:.1f}"), delta=rsi_status)
         t2.metric("ADX(14)", _safe_fmt(tech.adx, "{:.1f}"),
-                   delta="Trending" if tech.adx and tech.adx > 25 else "Range-Bound")
+                   delta="Trending" if tech.adx and tech.adx > 25 else "Sideways")
         t3.metric("MACD", _safe_fmt(tech.macd_line, "{:.2f}"),
                    delta=f"Hist: {tech.macd_histogram:+.2f}" if tech.macd_histogram is not None else "")
         t4.metric("Supertrend", (tech.supertrend_direction or "N/A").title())
@@ -851,7 +867,7 @@ def _render_historical_analysis(selected_index: str, display_name: str):
             xaxis_rangeslider_visible=False,
             margin=dict(l=40, r=20, t=30, b=30),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ══════════════════════════════════════════════════════════════════════════

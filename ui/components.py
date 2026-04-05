@@ -13,6 +13,7 @@ def inject_custom_css() -> None:
     st.markdown(
         """
     <style>
+    /* ── Signal badges ──────────────────────────────────────────── */
     .signal-bullish {
         background-color: #0e6b0e; color: white;
         padding: 4px 12px; border-radius: 6px; font-weight: 700;
@@ -28,6 +29,8 @@ def inject_custom_css() -> None:
         padding: 4px 12px; border-radius: 6px; font-weight: 700;
         display: inline-block; text-align: center; min-width: 80px;
     }
+
+    /* ── Bias box ───────────────────────────────────────────────── */
     .bias-box {
         padding: 24px; border-radius: 12px; text-align: center;
         font-size: 1.3rem; font-weight: 700; margin: 10px 0 20px;
@@ -35,6 +38,8 @@ def inject_custom_css() -> None:
     .bias-bullish { background: linear-gradient(135deg, #1b5e20, #388e3c); color: white; }
     .bias-bearish { background: linear-gradient(135deg, #b71c1c, #e53935); color: white; }
     .bias-neutral { background: linear-gradient(135deg, #f57f17, #fbc02d); color: black; }
+
+    /* ── Utility ────────────────────────────────────────────────── */
     .freshness { font-size: 0.75rem; color: #888; font-style: italic; }
     .phase-badge {
         padding: 4px 14px; border-radius: 20px; font-weight: 700;
@@ -43,8 +48,105 @@ def inject_custom_css() -> None:
     .phase-pre_market  { background: #1565c0; color: white; }
     .phase-market_open { background: #2e7d32; color: white; }
     .phase-post_market { background: #616161; color: white; }
-    div[data-testid="stMetric"] { background: #1e1e2f; border-radius: 10px; padding: 12px; }
+
+    /* ── Metric cards ───────────────────────────────────────────── */
+    div[data-testid="stMetric"] {
+        background: #1e1e2f; border-radius: 10px; padding: 12px;
+    }
+
+    /* ── Animations ─────────────────────────────────────────────── */
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* ══════════════════════════════════════════════════════════════
+       RESPONSIVE: Tablet (≤ 1024px)
+       ══════════════════════════════════════════════════════════════ */
+    @media (max-width: 1024px) {
+        /* Let columns wrap on tablets */
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.5rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            min-width: 45% !important;
+            flex: 1 1 45% !important;
+        }
+        /* Slightly smaller fonts */
+        div[data-testid="stMetric"] { padding: 8px; }
+        div[data-testid="stMetric"] label { font-size: 0.75rem !important; }
+        .bias-box { font-size: 1.1rem; padding: 16px; }
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       RESPONSIVE: Mobile (≤ 768px)
+       ══════════════════════════════════════════════════════════════ */
+    @media (max-width: 768px) {
+        /* Stack all columns vertically on mobile */
+        div[data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+            gap: 0.25rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+            width: 100% !important;
+        }
+
+        /* Smaller metrics */
+        div[data-testid="stMetric"] {
+            padding: 8px 10px;
+        }
+        div[data-testid="stMetric"] label {
+            font-size: 0.7rem !important;
+        }
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            font-size: 1.2rem !important;
+        }
+
+        /* Compact badges */
+        .signal-bullish, .signal-bearish, .signal-neutral {
+            min-width: 60px; padding: 3px 8px; font-size: 0.75rem;
+        }
+        .bias-box { font-size: 1rem; padding: 12px; margin: 6px 0 12px; }
+        .phase-badge { font-size: 0.75rem; padding: 3px 10px; }
+
+        /* Scrollable tables on mobile */
+        table {
+            display: block; overflow-x: auto; -webkit-overflow-scrolling: touch;
+        }
+        table td, table th {
+            padding: 6px 8px !important; font-size: 0.8rem !important;
+            white-space: nowrap;
+        }
+
+        /* Sidebar collapsed by default on mobile (Streamlit handles this) */
+        section[data-testid="stSidebar"] {
+            min-width: 0 !important;
+        }
+
+        /* Reduce plotly chart minimum height */
+        div[data-testid="stPlotlyChart"] > div {
+            min-height: 250px !important;
+        }
+
+        /* Tabs: scrollable on mobile */
+        div[data-testid="stTabs"] button[data-baseweb="tab"] {
+            font-size: 0.75rem !important;
+            padding: 6px 10px !important;
+        }
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       RESPONSIVE: Small mobile (≤ 480px)
+       ══════════════════════════════════════════════════════════════ */
+    @media (max-width: 480px) {
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            font-size: 1rem !important;
+        }
+        .bias-box { font-size: 0.9rem; padding: 10px; }
+        table td, table th {
+            padding: 4px 6px !important; font-size: 0.72rem !important;
+        }
+    }
     </style>
     """,
         unsafe_allow_html=True,

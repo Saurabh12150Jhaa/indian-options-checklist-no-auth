@@ -180,13 +180,14 @@ class CPRAnalysis:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-DAY_TYPES = ("trending", "range_bound", "volatile", "expiry")
+DAY_TYPES = ("trending_up", "trending_down", "sideways", "volatile", "expiry")
 
 
 @dataclass
 class DayClassification:
     """Classified trading day with reasoning."""
-    day_type: str  # trending / range_bound / volatile / expiry
+    day_type: str  # trending_up / trending_down / sideways / volatile / expiry
+    direction: str  # bullish / bearish / neutral
     confidence: float  # 0-1
     factors: list[str]  # human-readable reasons
     vix: VIXRegime
@@ -202,9 +203,10 @@ class DayClassification:
     @property
     def summary(self) -> str:
         type_labels = {
-            "trending": "Trending Day",
-            "range_bound": "Range-Bound Day",
-            "volatile": "Volatile / Event Day",
+            "trending_up": "Trending Up (Bullish)",
+            "trending_down": "Trending Down (Bearish)",
+            "sideways": "Sideways / Range-Bound",
+            "volatile": "Volatile / Choppy",
             "expiry": "Expiry Day",
         }
         label = type_labels.get(self.day_type, self.day_type)
@@ -225,26 +227,20 @@ def classify_day(
     atr_pct: Optional[float] = None,
 ) -> DayClassification:
     """
-    Classify the trading day based on available market data.
+    Classify the trading day using PRICE-ACTION-FIRST approach.
 
-    Uses a weighted scoring system where:
-    - Each factor votes for one or more day types
-    - Confidence = best_score / (best_score + second_best_score)
-      so it measures *separation* between the top two, not diluted by all four
-    - Additional hard data (day range, % change) can override weaker signals
+    Design principles:
+    1. Actual price action (change%, range%, directional efficiency) is ground truth
+    2. Direction is explicit — trending_up vs trending_down
+    3. Indicators (ADX, VIX, PCR) provide context, NOT classification override
+    4. Directional efficiency = |change| / range — distinguishes trending from volatile
 
-    Args:
-        vix_value: India VIX (0 if unavailable)
-        pcr_value: Put-Call Ratio (0 if unavailable — will be ignored)
-        adx_value: ADX(14) trend strength
-        gap_analysis: Opening gap classification
-        orb_analysis: Opening Range Breakout analysis
-        cpr_analysis: Central Pivot Range
-        today: Date to classify (defaults to today)
-        day_range_pct: (High - Low) / Close * 100 — actual intraday range
-        day_change_pct: (Close - PrevClose) / PrevClose * 100 — daily return
-        rsi_value: RSI(14) — momentum/oversold/overbought
-        atr_pct: ATR(14) as % of close — recent volatility context
+    Categories:
+    - trending_up:  Market moved decisively higher
+    - trending_down: Market moved decisively lower
+    - sideways:     Small range, small change — nothing happened
+    - volatile:     Large range but no clear direction (whipsaw / choppy)
+    - expiry:       Weekly/monthly expiry — theta decay dominates
     """
     if today is None:
         today = date.today()
@@ -264,210 +260,216 @@ def classify_day(
     is_monthly_expiry = today == last_date
     is_weekly_expiry = is_thursday and not is_monthly_expiry
 
-    # ── Scoring: each factor adds to one or more day types ──
-    scores = {"trending": 0.0, "range_bound": 0.0, "volatile": 0.0, "expiry": 0.0}
     factors = []
 
-    # Factor 1: VIX (weight: 2-3)
-    if vix.level == "low":
-        scores["range_bound"] += 2.0
-        factors.append(f"VIX {vix_value:.1f} (low) — favours range-bound / premium selling")
-    elif vix.level == "normal":
-        scores["trending"] += 1.0
-        scores["range_bound"] += 1.0
-        factors.append(f"VIX {vix_value:.1f} (normal) — both directional and neutral viable")
-    elif vix.level == "high":
-        scores["volatile"] += 2.5
-        scores["trending"] += 1.5
-        factors.append(f"VIX {vix_value:.1f} (high) — volatility elevated, directional moves likely")
-    elif vix.level == "extreme":
-        scores["volatile"] += 4.0
-        scores["trending"] += 1.0
-        factors.append(f"VIX {vix_value:.1f} (extreme) — very high fear, hedge everything")
+    # ── STEP 1: Compute price-action metrics (the GROUND TRUTH) ──
+    abs_change = abs(day_change_pct) if day_change_pct is not None else None
+    range_pct = day_range_pct  # (high-low)/close * 100
 
-    # Factor 2: ADX (weight: 2.5-3)
+    # Directional efficiency: how much of the range was directional
+    # 1.0 = pure trend (open-to-close equals the range)
+    # 0.0 = pure reversal (close == open despite range)
+    if abs_change is not None and range_pct and range_pct > 0:
+        efficiency = abs_change / range_pct
+    else:
+        efficiency = None
+
+    # ── STEP 2: Classify from price action ──
+    day_type = None
+    direction = "neutral"
+    confidence = 0.50
+
+    has_price_data = abs_change is not None and range_pct is not None
+
+    if has_price_data:
+        # Determine direction from change
+        if day_change_pct > 0.1:
+            direction = "bullish"
+        elif day_change_pct < -0.1:
+            direction = "bearish"
+
+        # Tier 1: Extreme moves — unambiguous classification
+        if abs_change >= 2.0:
+            day_type = "trending_up" if direction == "bullish" else "trending_down"
+            confidence = min(0.70 + abs_change * 0.07, 0.97)
+            factors.append(f"Day change {day_change_pct:+.2f}% — extreme directional move")
+
+        # Tier 2: Strong moves — directional day
+        elif abs_change >= 1.0:
+            day_type = "trending_up" if direction == "bullish" else "trending_down"
+            confidence = 0.60 + abs_change * 0.10
+            factors.append(f"Day change {day_change_pct:+.2f}% — clear directional day")
+
+        # Tier 3: Wide range but small net change = volatile/choppy
+        elif range_pct >= 1.8 and efficiency is not None and efficiency < 0.35:
+            day_type = "volatile"
+            confidence = 0.55 + range_pct * 0.08
+            factors.append(f"Range {range_pct:.2f}% but change only {day_change_pct:+.2f}% — "
+                           f"choppy/whipsaw (efficiency {efficiency:.0%})")
+
+        # Tier 4: Moderate move with good efficiency = mild trend
+        elif abs_change >= 0.5 and efficiency is not None and efficiency >= 0.45:
+            day_type = "trending_up" if direction == "bullish" else "trending_down"
+            confidence = 0.55 + abs_change * 0.08
+            factors.append(f"Day change {day_change_pct:+.2f}%, efficiency {efficiency:.0%} — "
+                           f"moderate but directional")
+
+        # Tier 5: Wide range with moderate efficiency = volatile
+        elif range_pct >= 1.3 and efficiency is not None and efficiency < 0.40:
+            day_type = "volatile"
+            confidence = 0.52 + range_pct * 0.06
+            factors.append(f"Range {range_pct:.2f}%, low efficiency {efficiency:.0%} — choppy day")
+
+        # Tier 6: Very quiet day
+        elif abs_change < 0.3 and range_pct < 0.7:
+            day_type = "sideways"
+            confidence = 0.70
+            factors.append(f"Change {day_change_pct:+.2f}%, range {range_pct:.2f}% — very quiet day")
+
+        # Tier 7: Mild day — small change and modest range
+        elif abs_change < 0.5 and range_pct < 1.1:
+            day_type = "sideways"
+            confidence = 0.58
+            factors.append(f"Change {day_change_pct:+.2f}%, range {range_pct:.2f}% — sideways")
+
+        # Tier 8: Borderline — moderate change, narrow range, still directional
+        elif abs_change >= 0.5:
+            day_type = "trending_up" if direction == "bullish" else "trending_down"
+            confidence = 0.50 + abs_change * 0.06
+            factors.append(f"Day change {day_change_pct:+.2f}% — borderline directional")
+
+        # Tier 9: Default to sideways for anything left
+        else:
+            day_type = "sideways"
+            confidence = 0.52
+            factors.append(f"Change {day_change_pct:+.2f}%, range {range_pct:.2f}% — "
+                           f"no strong signal, defaulting sideways")
+
+    # ── STEP 3: Indicators as CONTEXT (add to factors, minor confidence adjustments) ──
+
+    # VIX context
+    if vix.level == "low":
+        factors.append(f"VIX {vix_value:.1f} (low) — premiums cheap, favours buying")
+        if day_type == "sideways":
+            confidence = min(confidence + 0.05, 0.97)  # confirms sideways
+    elif vix.level == "normal":
+        factors.append(f"VIX {vix_value:.1f} (normal) — balanced premiums")
+    elif vix.level == "high":
+        factors.append(f"VIX {vix_value:.1f} (high) — elevated fear, premiums expensive")
+        if day_type and "trending" in day_type:
+            confidence = min(confidence + 0.03, 0.97)
+    elif vix.level == "extreme":
+        factors.append(f"VIX {vix_value:.1f} (extreme) — panic mode, hedge everything")
+        if day_type == "volatile":
+            confidence = min(confidence + 0.05, 0.97)
+
+    # ADX context (trend strength over last 14 days — NOT today's action)
     if adx_value is not None:
         if adx_value > 30:
-            scores["trending"] += 3.0
-            factors.append(f"ADX {adx_value:.0f} (>30) — very strong trend")
+            factors.append(f"ADX {adx_value:.0f} (>30) — strong recent trend supports directional bias")
+            if day_type and "trending" in day_type:
+                confidence = min(confidence + 0.05, 0.97)
         elif adx_value > 25:
-            scores["trending"] += 2.5
-            factors.append(f"ADX {adx_value:.0f} (>25) — strong trend detected")
+            factors.append(f"ADX {adx_value:.0f} (>25) — moderate trend in background")
+            if day_type and "trending" in day_type:
+                confidence = min(confidence + 0.02, 0.97)
         elif adx_value < 18:
-            scores["range_bound"] += 3.0
-            factors.append(f"ADX {adx_value:.0f} (<18) — no trend, range-bound")
-        elif adx_value < 22:
-            scores["range_bound"] += 1.5
-            factors.append(f"ADX {adx_value:.0f} — weak trend, likely range-bound")
+            factors.append(f"ADX {adx_value:.0f} (<18) — no recent trend, range regime")
+            if day_type == "sideways":
+                confidence = min(confidence + 0.05, 0.97)
         else:
-            scores["trending"] += 0.5
-            scores["range_bound"] += 0.5
             factors.append(f"ADX {adx_value:.0f} — borderline trend strength")
 
-    # Factor 3: Gap (weight: 2-4 — gaps are very strong signals)
+    # Gap context
     if gap_analysis:
         abs_gap = abs(gap_analysis.gap_pct)
-        if abs_gap >= 2.0:
-            scores["volatile"] += 3.0
-            scores["trending"] += 3.0
+        if abs_gap >= 1.0:
             factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
-                           f"massive gap, highly directional/volatile open")
-        elif abs_gap >= 1.0:
-            scores["trending"] += 2.5
-            scores["volatile"] += 1.5
-            factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
-                           f"large gap, strong directional open")
-        elif abs_gap >= 0.5:
-            scores["trending"] += 1.5
+                           f"large gap, watch for gap fill vs continuation")
+        elif abs_gap >= 0.3:
             factors.append(f"Gap {gap_analysis.direction} {gap_analysis.gap_pct:+.1f}% — "
                            f"moderate gap")
-        elif abs_gap < 0.2:
-            scores["range_bound"] += 1.0
+        else:
             factors.append("Flat open — no gap bias")
 
-    # Factor 4: ORB
+    # ORB context
     if orb_analysis:
         if orb_analysis.assessment == "wide":
-            scores["trending"] += 2.0
-            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (wide) — trending signal")
+            factors.append(f"ORB {orb_analysis.orb_range:.0f}pts (wide) — confirms range expansion")
         elif orb_analysis.assessment == "narrow":
-            scores["range_bound"] += 2.0
-            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (narrow) — consolidation")
+            factors.append(f"ORB {orb_analysis.orb_range:.0f}pts (narrow) — tight opening, breakout possible later")
         else:
-            factors.append(f"ORB range {orb_analysis.orb_range:.0f}pts (normal)")
+            factors.append(f"ORB {orb_analysis.orb_range:.0f}pts (normal)")
 
-    # Factor 5: CPR (weight: 1.5 — confirmatory, should NOT override strong signals)
+    # CPR context
     if cpr_analysis:
         if cpr_analysis.is_narrow:
-            scores["trending"] += 1.5
-            factors.append(f"Narrow CPR ({cpr_analysis.cpr_width_pct:.2f}%) — trending signal")
+            factors.append(f"Narrow CPR ({cpr_analysis.cpr_width_pct:.2f}%) — potential breakout")
         else:
-            scores["range_bound"] += 0.5  # reduced from 1.0 — wide CPR is weak signal
             factors.append(f"CPR width {cpr_analysis.cpr_width_pct:.2f}%")
 
-    # Factor 6: PCR (weight: 1-2 — only when data is available)
+    # PCR context
     if pcr_value > 0:
         if pcr_value > 1.3:
-            scores["trending"] += 1.5  # heavy put writing = bullish support
-            factors.append(f"PCR {pcr_value:.2f} (>1.3) — strong put writing, bullish underpinning")
+            factors.append(f"PCR {pcr_value:.2f} (>1.3) — heavy put writing, bullish support below")
         elif pcr_value < 0.7:
-            scores["trending"] += 1.0  # low PCR can mean bearish trend
-            scores["volatile"] += 0.5
-            factors.append(f"PCR {pcr_value:.2f} (<0.7) — bearish, calls dominate")
+            factors.append(f"PCR {pcr_value:.2f} (<0.7) — call-heavy, potential resistance above")
         else:
-            scores["range_bound"] += 0.5
-            factors.append(f"PCR {pcr_value:.2f} — neutral")
+            factors.append(f"PCR {pcr_value:.2f} — neutral positioning")
 
-    # Factor 7: Actual day range (weight: 3-5 — HARD DATA, strongest signal)
-    if day_range_pct is not None:
-        if day_range_pct >= 3.0:
-            scores["volatile"] += 5.0
-            scores["trending"] += 3.0
-            factors.append(f"Day range {day_range_pct:.1f}% — extreme intraday swing")
-        elif day_range_pct >= 2.0:
-            scores["volatile"] += 3.0
-            scores["trending"] += 2.0
-            factors.append(f"Day range {day_range_pct:.1f}% — very wide range")
-        elif day_range_pct >= 1.2:
-            scores["trending"] += 2.5
-            factors.append(f"Day range {day_range_pct:.1f}% — above-average movement")
-        elif day_range_pct < 0.5:
-            scores["range_bound"] += 3.0
-            factors.append(f"Day range {day_range_pct:.1f}% — very narrow, range-bound")
-        elif day_range_pct < 0.8:
-            scores["range_bound"] += 1.5
-            factors.append(f"Day range {day_range_pct:.1f}% — below-average movement")
-
-    # Factor 8: Daily change (weight: 2-4 — HARD DATA)
-    if day_change_pct is not None:
-        abs_change = abs(day_change_pct)
-        if abs_change >= 3.0:
-            scores["volatile"] += 4.0
-            scores["trending"] += 3.0
-            factors.append(f"Day change {day_change_pct:+.1f}% — extreme move")
-        elif abs_change >= 1.5:
-            scores["trending"] += 3.0
-            scores["volatile"] += 1.0
-            factors.append(f"Day change {day_change_pct:+.1f}% — strong directional move")
-        elif abs_change >= 0.8:
-            scores["trending"] += 2.0
-            factors.append(f"Day change {day_change_pct:+.1f}% — clear directional day")
-        elif abs_change < 0.2:
-            scores["range_bound"] += 2.0
-            factors.append(f"Day change {day_change_pct:+.1f}% — unchanged, range-bound")
-
-    # Factor 9: RSI (weight: 1 — supplementary)
+    # RSI context
     if rsi_value is not None:
         if rsi_value > 75:
-            scores["trending"] += 1.0
-            factors.append(f"RSI {rsi_value:.0f} — overbought, strong uptrend")
+            factors.append(f"RSI {rsi_value:.0f} — overbought, watch for pullback")
         elif rsi_value < 25:
-            scores["trending"] += 1.0
-            factors.append(f"RSI {rsi_value:.0f} — oversold, strong downtrend")
+            factors.append(f"RSI {rsi_value:.0f} — oversold, watch for bounce")
         elif 40 <= rsi_value <= 60:
-            scores["range_bound"] += 0.5
-            factors.append(f"RSI {rsi_value:.0f} — neutral")
+            factors.append(f"RSI {rsi_value:.0f} — neutral momentum")
 
-    # Factor 10: ATR % (weight: 1-2 — recent volatility baseline)
+    # ATR context
     if atr_pct is not None:
         if atr_pct >= 2.0:
-            scores["volatile"] += 2.0
-            factors.append(f"ATR {atr_pct:.1f}% — market in high-volatility regime")
+            factors.append(f"ATR {atr_pct:.1f}% — high-volatility regime")
         elif atr_pct >= 1.2:
-            scores["trending"] += 1.0
             factors.append(f"ATR {atr_pct:.1f}% — elevated volatility")
         elif atr_pct < 0.6:
-            scores["range_bound"] += 1.0
             factors.append(f"ATR {atr_pct:.1f}% — low volatility regime")
 
-    # Factor 11: Expiry (weight: 3-4 — can override but only IF it's actually expiry)
+    # ── STEP 4: Fallback when no price data (pre-market / live) ──
+    if day_type is None:
+        # No OHLC yet — use indicators to make a best guess
+        day_type, direction, confidence = _classify_from_indicators_only(
+            vix=vix, pcr_value=pcr_value, adx_value=adx_value,
+            gap_analysis=gap_analysis, cpr_analysis=cpr_analysis,
+        )
+        factors.insert(0, "No day OHLC yet — classification from indicators only (less reliable)")
+
+    # ── STEP 5: Expiry override — only if actually expiry day ──
     if is_monthly_expiry:
-        scores["expiry"] += 4.0
+        # Monthly expiry overrides unless there's an extreme move
+        if abs_change is None or abs_change < 2.0:
+            day_type = "expiry"
+            confidence = max(confidence, 0.70)
         factors.append("Monthly expiry day — max theta decay + gamma risk")
     elif is_weekly_expiry:
-        scores["expiry"] += 3.0
+        if abs_change is None or abs_change < 1.5:
+            day_type = "expiry"
+            confidence = max(confidence, 0.60)
         factors.append("Weekly expiry day — elevated theta decay")
 
-    # ── Determine winner with proper confidence ──
-    sorted_types = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best_type = sorted_types[0][0]
-    best_score = sorted_types[0][1]
-    second_type = sorted_types[1][0] if len(sorted_types) > 1 else ""
-    second_score = sorted_types[1][1] if len(sorted_types) > 1 else 0.0
-    third_score = sorted_types[2][1] if len(sorted_types) > 2 else 0.0
-
-    # Confidence = how much the winner dominates the runner-up
-    if best_score + second_score > 0:
-        confidence = best_score / (best_score + second_score)
-    else:
-        confidence = 0.5
-
-    # Synergy boost: "trending" and "volatile" are NOT contradictory — a crash is
-    # both trending and volatile. When these two dominate and the rest is negligible,
-    # the classification is actually very certain (just debating which label).
-    # Boost confidence using margin over the THIRD place instead.
-    synergy_pairs = {("trending", "volatile"), ("volatile", "trending")}
-    if (best_type, second_type) in synergy_pairs and best_score > 5 and second_score > 5:
-        # Both trending and volatile are strong — use margin over 3rd place
-        if best_score + second_score > 0 and third_score >= 0:
-            # Confidence = how much the top TWO dominate the rest
-            combined = best_score + second_score
-            synergy_conf = combined / (combined + third_score) if (combined + third_score) > 0 else 0.8
-            # Use the higher of the two confidence measures
-            confidence = max(confidence, synergy_conf * 0.95)  # scale slightly under 1.0
-
-    # Floor confidence at 50% (random) and cap at 97%
-    confidence = max(0.5, min(0.97, confidence))
+    # ── STEP 6: Clamp confidence ──
+    confidence = max(0.50, min(0.97, confidence))
 
     # Position size multiplier
     pos_mult = vix.position_size_multiplier
-    if best_type == "volatile":
+    if day_type == "volatile":
         pos_mult = min(pos_mult, 0.5)
     if is_monthly_expiry:
         pos_mult = min(pos_mult, 0.75)
 
     return DayClassification(
-        day_type=best_type,
+        day_type=day_type,
+        direction=direction,
         confidence=confidence,
         factors=factors,
         vix=vix,
@@ -480,6 +482,80 @@ def classify_day(
         is_monthly_expiry=is_monthly_expiry,
         position_size_multiplier=pos_mult,
     )
+
+
+def _classify_from_indicators_only(
+    vix: VIXRegime,
+    pcr_value: float,
+    adx_value: Optional[float],
+    gap_analysis: Optional[GapAnalysis],
+    cpr_analysis: Optional[CPRAnalysis],
+) -> tuple[str, str, float]:
+    """Fallback when no day OHLC data is available (pre-market).
+
+    Returns (day_type, direction, confidence).
+    Less reliable than price-action classification.
+    """
+    # Simple scoring for fallback
+    trend_score = 0.0
+    sideways_score = 0.0
+    volatile_score = 0.0
+    direction = "neutral"
+
+    if vix.level in ("high", "extreme"):
+        volatile_score += 3.0
+    elif vix.level == "low":
+        sideways_score += 2.0
+    else:
+        trend_score += 1.0
+        sideways_score += 1.0
+
+    if adx_value is not None:
+        if adx_value > 25:
+            trend_score += 2.5
+        elif adx_value < 18:
+            sideways_score += 2.5
+
+    if gap_analysis:
+        abs_gap = abs(gap_analysis.gap_pct)
+        if abs_gap >= 1.0:
+            trend_score += 3.0
+            volatile_score += 2.0
+            direction = "bullish" if gap_analysis.gap_pct > 0 else "bearish"
+        elif abs_gap >= 0.3:
+            trend_score += 1.5
+            direction = "bullish" if gap_analysis.gap_pct > 0 else "bearish"
+        else:
+            sideways_score += 1.0
+
+    if cpr_analysis:
+        if cpr_analysis.is_narrow:
+            trend_score += 1.5
+        else:
+            sideways_score += 0.5
+
+    if pcr_value > 0:
+        if pcr_value > 1.3:
+            direction = "bullish"
+        elif pcr_value < 0.7:
+            direction = "bearish"
+
+    best = max(trend_score, sideways_score, volatile_score)
+    if best == volatile_score and volatile_score > 0:
+        day_type = "volatile"
+    elif best == trend_score and trend_score > 0:
+        day_type = "trending_up" if direction == "bullish" else "trending_down"
+    elif best == sideways_score and sideways_score > 0:
+        day_type = "sideways"
+    else:
+        day_type = "sideways"
+
+    # Low confidence for indicator-only classification
+    total = trend_score + sideways_score + volatile_score
+    confidence = (best / total * 0.7) if total > 0 else 0.50
+    confidence = max(0.50, min(0.65, confidence))  # cap at 65% for indicator-only
+
+    return day_type, direction, confidence
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -502,16 +578,36 @@ class StrategyRecommendation:
 
 # Strategy database — maps day types to appropriate strategies
 STRATEGY_DATABASE = {
-    "trending": [
+    "trending_up": [
         StrategyRecommendation(
-            name="OTM Momentum Scalp",
+            name="Bull Call Spread",
             strategy_type="directional_buying",
-            description="Buy slightly OTM options on strong momentum breakouts for quick 10-30% returns",
-            suitability="Trending market allows directional moves to sustain",
+            description="Buy ATM Call + Sell OTM Call for defined-risk bullish trade",
+            suitability="Market trending up — defined risk, lower cost than naked long",
+            risk_level="low",
+            entry_window="09:20-14:00 IST",
+            config={
+                "name": "Bull Call Spread",
+                "conditions": [
+                    {"type": "price_vs_ema", "params": {"period": 20, "position": "above"}},
+                    {"type": "vwap", "params": {"position": "above"}},
+                ],
+                "condition_logic": "AND",
+                "legs": [
+                    {"template": "atm_call", "action": "BUY", "qty": 1},
+                    {"template": "otm_call_1", "action": "SELL", "qty": 1},
+                ],
+            },
+        ),
+        StrategyRecommendation(
+            name="OTM Call Momentum Scalp",
+            strategy_type="directional_buying",
+            description="Buy slightly OTM calls on strong upside breakout for quick 10-30% returns",
+            suitability="Strong bullish trend — momentum carries OTM calls higher",
             risk_level="medium",
             entry_window="09:20-11:30 IST",
             config={
-                "name": "OTM Momentum Scalp",
+                "name": "OTM Call Scalp",
                 "conditions": [
                     {"type": "supertrend", "params": {"period": 10, "multiplier": 3.0, "signal": "bullish"}},
                     {"type": "vwap", "params": {"position": "above"}},
@@ -521,37 +617,17 @@ STRATEGY_DATABASE = {
             },
         ),
         StrategyRecommendation(
-            name="Opening Range Breakout (ORB)",
+            name="Opening Range Breakout (Long)",
             strategy_type="directional_buying",
-            description="Trade the breakout of the first 15-minute candle range",
-            suitability="Strong directional open with follow-through potential",
+            description="Trade upside breakout of the first 15-minute candle range",
+            suitability="Gap-up or strong open with bullish follow-through",
             risk_level="medium",
             entry_window="09:30-10:00 IST (after ORB forms)",
             config={
-                "name": "ORB Breakout",
+                "name": "ORB Long",
                 "conditions": [
                     {"type": "gap", "params": {"direction": "up", "min_pct": 0.3}},
-                    {"type": "trend_strength", "params": {"period": 14, "operator": ">", "value": 22}},
-                ],
-                "condition_logic": "AND",
-                "legs": [
-                    {"template": "atm_call", "action": "BUY", "qty": 1},
-                    {"template": "otm_call_1", "action": "SELL", "qty": 1},
-                ],
-            },
-        ),
-        StrategyRecommendation(
-            name="Trend-Following Bull/Bear Spread",
-            strategy_type="directional_buying",
-            description="Defined-risk directional spread in the direction of the trend",
-            suitability="ADX confirms strong trend, spread limits risk",
-            risk_level="low",
-            entry_window="09:20-14:00 IST",
-            config={
-                "name": "Trend Bull Spread",
-                "conditions": [
-                    {"type": "price_vs_ema", "params": {"period": 20, "position": "above"}},
-                    {"type": "trend_strength", "params": {"period": 14, "operator": ">", "value": 25}},
+                    {"type": "consecutive_candles", "params": {"color": "green", "count": 2}},
                 ],
                 "condition_logic": "AND",
                 "legs": [
@@ -561,12 +637,71 @@ STRATEGY_DATABASE = {
             },
         ),
     ],
-    "range_bound": [
+    "trending_down": [
+        StrategyRecommendation(
+            name="Bear Put Spread",
+            strategy_type="directional_buying",
+            description="Buy ATM Put + Sell OTM Put for defined-risk bearish trade",
+            suitability="Market trending down — defined risk, profits from continued decline",
+            risk_level="low",
+            entry_window="09:20-14:00 IST",
+            config={
+                "name": "Bear Put Spread",
+                "conditions": [
+                    {"type": "price_vs_ema", "params": {"period": 20, "position": "below"}},
+                    {"type": "vwap", "params": {"position": "below"}},
+                ],
+                "condition_logic": "AND",
+                "legs": [
+                    {"template": "atm_put", "action": "BUY", "qty": 1},
+                    {"template": "otm_put_1", "action": "SELL", "qty": 1},
+                ],
+            },
+        ),
+        StrategyRecommendation(
+            name="OTM Put Momentum Scalp",
+            strategy_type="directional_buying",
+            description="Buy slightly OTM puts on strong downside breakdown for quick 10-30% returns",
+            suitability="Strong bearish trend — panic selling makes OTM puts surge",
+            risk_level="medium",
+            entry_window="09:20-11:30 IST",
+            config={
+                "name": "OTM Put Scalp",
+                "conditions": [
+                    {"type": "supertrend", "params": {"period": 10, "multiplier": 3.0, "signal": "bearish"}},
+                    {"type": "vwap", "params": {"position": "below"}},
+                ],
+                "condition_logic": "AND",
+                "legs": [{"template": "otm_put_half", "action": "BUY", "qty": 1}],
+            },
+        ),
+        StrategyRecommendation(
+            name="Opening Range Breakdown (Short)",
+            strategy_type="directional_buying",
+            description="Trade downside breakdown of the first 15-minute candle range",
+            suitability="Gap-down or weak open with bearish follow-through",
+            risk_level="medium",
+            entry_window="09:30-10:00 IST (after ORB forms)",
+            config={
+                "name": "ORB Short",
+                "conditions": [
+                    {"type": "gap", "params": {"direction": "down", "min_pct": 0.3}},
+                    {"type": "consecutive_candles", "params": {"color": "red", "count": 2}},
+                ],
+                "condition_logic": "AND",
+                "legs": [
+                    {"template": "atm_put", "action": "BUY", "qty": 1},
+                    {"template": "otm_put_1", "action": "SELL", "qty": 1},
+                ],
+            },
+        ),
+    ],
+    "sideways": [
         StrategyRecommendation(
             name="ATM Short Straddle",
             strategy_type="premium_selling",
             description="Sell ATM Call + ATM Put to collect premium in sideways market",
-            suitability="Low ADX and range-bound conditions maximise theta income",
+            suitability="Low range, low change — premium melts as market stays flat",
             risk_level="high",
             entry_window="09:20-09:35 IST",
             config={
@@ -586,7 +721,7 @@ STRATEGY_DATABASE = {
             name="Intraday Iron Condor",
             strategy_type="premium_selling_hedged",
             description="Sell OTM Call + Put spreads for defined-risk premium collection",
-            suitability="Range-bound with defined risk — iron condor profits if market stays in range",
+            suitability="Sideways market — iron condor profits if market stays in range",
             risk_level="medium",
             entry_window="09:25-10:30 IST",
             config={
@@ -607,8 +742,8 @@ STRATEGY_DATABASE = {
         StrategyRecommendation(
             name="VWAP Mean Reversion",
             strategy_type="directional_buying",
-            description="Buy options when price deviates significantly from VWAP and shows reversal",
-            suitability="Range-bound days see mean reversion around VWAP",
+            description="Buy options when price deviates from VWAP and shows reversal",
+            suitability="Sideways market reverts to mean — buy dips, sell rips around VWAP",
             risk_level="medium",
             entry_window="10:00-14:00 IST",
             config={
@@ -624,6 +759,25 @@ STRATEGY_DATABASE = {
     ],
     "volatile": [
         StrategyRecommendation(
+            name="Long Straddle",
+            strategy_type="directional_buying",
+            description="Buy ATM Call + ATM Put to profit from big move in either direction",
+            suitability="High volatility, wide range — big moves expected, direction uncertain",
+            risk_level="medium",
+            entry_window="09:20-10:00 IST",
+            config={
+                "name": "Long Straddle",
+                "conditions": [
+                    {"type": "atr_rank", "params": {"period": 14, "operator": ">", "value": 2.0}},
+                ],
+                "condition_logic": "AND",
+                "legs": [
+                    {"template": "atm_call", "action": "BUY", "qty": 1},
+                    {"template": "atm_put", "action": "BUY", "qty": 1},
+                ],
+            },
+        ),
+        StrategyRecommendation(
             name="ORB with Wide Stops",
             strategy_type="directional_buying",
             description="Trade ORB breakout with wider stops to accommodate volatile swings",
@@ -638,25 +792,6 @@ STRATEGY_DATABASE = {
                 ],
                 "condition_logic": "AND",
                 "legs": [{"template": "otm_call_half", "action": "BUY", "qty": 1}],
-            },
-        ),
-        StrategyRecommendation(
-            name="Hedged Straddle Buy",
-            strategy_type="directional_buying",
-            description="Buy ATM straddle to profit from expected big move in either direction",
-            suitability="Extreme VIX or event day — big move expected but direction uncertain",
-            risk_level="medium",
-            entry_window="09:20-10:00 IST",
-            config={
-                "name": "Long Straddle",
-                "conditions": [
-                    {"type": "atr_rank", "params": {"period": 14, "operator": ">", "value": 2.0}},
-                ],
-                "condition_logic": "AND",
-                "legs": [
-                    {"template": "atm_call", "action": "BUY", "qty": 1},
-                    {"template": "atm_put", "action": "BUY", "qty": 1},
-                ],
             },
         ),
     ],
@@ -731,26 +866,17 @@ def recommend_strategies(day: DayClassification) -> list[StrategyRecommendation]
     primary = STRATEGY_DATABASE.get(day.day_type, [])
     result = list(primary)
 
-    # Also include one strategy from the secondary type if confidence isn't high
+    # Also include one strategy from a complementary type if confidence isn't high
     if day.confidence < 0.65:
-        # Use the actual scores from the classification rather than parsing factor strings
-        # Factor strings contain hyphens ("range-bound") while keys use underscores ("range_bound")
-        # so keyword matching is unreliable. Instead, infer the secondary type by looking at
-        # which day types got mentioned most in the factors, mapping both forms.
-        type_keywords = {
-            "trending": ["trending", "trend", "directional", "momentum", "breakout"],
-            "range_bound": ["range-bound", "range_bound", "sideways", "consolidation", "narrow"],
-            "volatile": ["volatile", "volatility", "extreme", "fear", "wild", "swing"],
-            "expiry": ["expiry", "theta", "gamma"],
+        # Map to a sensible secondary type based on the primary
+        secondary_map = {
+            "trending_up": "sideways",      # if unsure, hedge with sideways strats
+            "trending_down": "volatile",     # bearish + unsure → volatile strats
+            "sideways": "trending_up",       # if unsure sideways, add a directional
+            "volatile": "trending_down",     # volatile + unsure → bearish protection
+            "expiry": "sideways",
         }
-        scores = {t: 0 for t in DAY_TYPES}
-        factor_text = " ".join(day.factors).lower()
-        for day_type, keywords in type_keywords.items():
-            for kw in keywords:
-                scores[day_type] += factor_text.count(kw)
-        # Exclude primary
-        scores[day.day_type] = -1
-        secondary_type = max(scores, key=scores.get)
+        secondary_type = secondary_map.get(day.day_type, "sideways")
         secondary = STRATEGY_DATABASE.get(secondary_type, [])
         if secondary:
             result.append(secondary[0])
