@@ -737,20 +737,93 @@ def analyze_date(
         logger.error("Step 3 (technicals) failed: %s", e)
         analysis.warnings.append(f"Technical computation error: {e}")
 
-    # ── Step 4: Load option chain from bhavcopy ──
+    # ── Step 4: Load option chain from bhavcopy (auto-download if missing) ──
     chain_df: Optional[pd.DataFrame] = None
     try:
+        t0 = time.monotonic()
         chain_df = load_bhavcopy_for_date(target_date, symbol)
+
+        # If not in cache, attempt auto-download from NSE
+        if chain_df is None:
+            try:
+                from services.bhavcopy.downloader import download_bhavcopies
+                from services.bhavcopy.cache import already_have
+
+                if not already_have(target_date):
+                    logger.info("Auto-downloading bhavcopy for %s...", target_date)
+                    dl_result = download_bhavcopies(
+                        start=target_date, end=target_date,
+                    )
+                    elapsed_dl = time.monotonic() - t0
+
+                    if dl_result.total_downloaded > 0:
+                        # Retry loading after successful download
+                        chain_df = load_bhavcopy_for_date(target_date, symbol)
+                        analysis.data_sources.append(
+                            f"Bhavcopy auto-downloaded from NSE [{elapsed_dl:.1f}s]"
+                        )
+                        if chain_df is None:
+                            # Downloaded the file but no data for this symbol
+                            analysis.warnings.append(
+                                f"Bhavcopy downloaded for {target_date} but no "
+                                f"{symbol} options data found in the file."
+                            )
+                    else:
+                        # Download attempted but nothing obtained
+                        # Check if it's a weekend or holiday
+                        wd = target_date.weekday()
+                        if wd >= 5:
+                            analysis.warnings.append(
+                                f"{target_date} is a {'Saturday' if wd == 5 else 'Sunday'} "
+                                f"— no F&O trading data available."
+                            )
+                        else:
+                            analysis.warnings.append(
+                                f"No bhavcopy available for {target_date}. "
+                                f"This is likely a market holiday or the data "
+                                f"is not yet published on NSE."
+                            )
+                        for msg in dl_result.messages:
+                            logger.info("Download detail: %s", msg)
+                else:
+                    # File exists on disk but load returned None — wrong symbol or parse issue
+                    analysis.warnings.append(
+                        f"Bhavcopy file exists for {target_date} but no "
+                        f"{symbol} options data could be extracted."
+                    )
+
+            except ImportError:
+                logger.warning("Bhavcopy download services not available")
+                analysis.warnings.append(
+                    f"No bhavcopy data for {symbol} on {target_date} "
+                    f"and download services are not available."
+                )
+            except Exception as dl_err:
+                logger.error("Bhavcopy auto-download failed: %s", dl_err)
+                analysis.warnings.append(
+                    f"Bhavcopy auto-download failed for {target_date}: {dl_err}"
+                )
+
         if chain_df is not None and not chain_df.empty:
             analysis.has_options = True
             spot = analysis.technical.spot if analysis.technical else 0.0
             analysis.options = compute_options_snapshot(chain_df, spot, target_date)
-            analysis.data_sources.append(f"Bhavcopy cache - {len(chain_df)} rows")
-        else:
-            analysis.warnings.append(
-                f"No bhavcopy data for {symbol} on {target_date}. "
-                "Download via Strategy Backtester > Data Management."
-            )
+            elapsed = time.monotonic() - t0
+            # Only add "Bhavcopy cache" source if we didn't already add auto-download source
+            if not any("auto-downloaded" in s for s in analysis.data_sources):
+                analysis.data_sources.append(
+                    f"Bhavcopy cache - {len(chain_df)} rows [{elapsed:.1f}s]"
+                )
+            else:
+                # Update existing source with row count
+                for idx, s in enumerate(analysis.data_sources):
+                    if "auto-downloaded" in s:
+                        analysis.data_sources[idx] = (
+                            f"Bhavcopy auto-downloaded from NSE - "
+                            f"{len(chain_df)} rows [{elapsed:.1f}s]"
+                        )
+                        break
+
     except Exception as e:
         logger.error("Step 4 (options) failed: %s", e)
         analysis.warnings.append(f"Options data error: {e}")

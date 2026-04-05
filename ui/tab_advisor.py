@@ -663,7 +663,10 @@ def _render_historical_analysis(selected_index: str, display_name: str):
     cache_key = f"hist_analysis_{selected_index}_{target_date}"
 
     if run_analysis:
-        with st.spinner(f"Fetching real data for {target_date} ({display_name})..."):
+        with st.spinner(
+            f"Analysing {target_date} ({display_name}) — fetching OHLC, VIX & "
+            f"options data (auto-downloading from NSE if needed)..."
+        ):
             st.session_state[cache_key] = analyze_date(target_date, selected_index)
 
     if cache_key not in st.session_state:
@@ -682,10 +685,22 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         st.metric("Option Chain", "Available" if analysis.has_options else "Not Available")
 
     if analysis.data_sources:
-        st.caption(f"Data from: {', '.join(analysis.data_sources)}")
+        for src in analysis.data_sources:
+            if "auto-downloaded" in src:
+                st.success(f"Data: {src}")
+            else:
+                st.caption(f"Data: {src}")
     if analysis.warnings:
         for w in analysis.warnings:
-            st.warning(w)
+            # Use appropriate severity based on message content
+            if "holiday" in w.lower() or "weekend" in w.lower() or "saturday" in w.lower() or "sunday" in w.lower():
+                st.info(w)
+            elif "not available" in w.lower() or "not yet published" in w.lower():
+                st.warning(w)
+            elif "error" in w.lower() or "failed" in w.lower():
+                st.error(w)
+            else:
+                st.warning(w)
 
     if not analysis.has_ohlc:
         st.error(f"No trading data for {target_date}. This may be a holiday or weekend.")
