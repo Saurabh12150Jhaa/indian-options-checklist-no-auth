@@ -17,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 from config import INDEX_CONFIG, IST
 from analysis import market_phase
 from ui.components import inject_custom_css, phase_badge
-from ui import tab_checklist, tab_oi_deep_dive, tab_stock_options, tab_market_breadth, tab_backtester, tab_news
+from ui import tab_checklist, tab_oi_deep_dive, tab_stock_options, tab_market_breadth, tab_backtester, tab_news, tab_advisor
 
 logging.basicConfig(level=logging.INFO)
 # Set third-party loggers to WARNING to reduce noise
@@ -85,6 +85,7 @@ tabs = st.tabs([
     "OI Deep Dive",
     "Stock Options",
     "Market Breadth",
+    "Market Advisor",
     "Strategy Backtester",
     "Market News",
 ])
@@ -102,7 +103,10 @@ with tabs[3]:
     tab_market_breadth.render()
 
 with tabs[4]:
-    tab_backtester.render()
+    tab_advisor.render(selected_index, display_name, timeframe)
 
 with tabs[5]:
+    tab_backtester.render()
+
+with tabs[6]:
     tab_news.render(selected_index, display_name)
