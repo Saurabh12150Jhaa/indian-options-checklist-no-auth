@@ -330,11 +330,11 @@ with tab_checklist:
         )
 
         # 2) EMA overlays
-        import pandas_ta as _ta
+        from analysis import _ema
         ema_colours = {9: "#fdd835", 20: "#42a5f5", 50: "#ab47bc", 200: "#ef6c00"}
         for period in [9, 20, 50, 200]:
-            ema_series = _ta.ema(chart_df["close"], length=period)
-            if ema_series is not None and not ema_series.dropna().empty:
+            ema_series = _ema(chart_df["close"], length=period)
+            if not ema_series.empty and not ema_series.dropna().empty:
                 tech_fig.add_trace(
                     go.Scatter(
                         x=chart_df.index, y=ema_series,

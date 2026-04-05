@@ -8,7 +8,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 
 from config import (
     EMA_PERIODS, RSI_PERIOD,
@@ -20,6 +19,42 @@ from config import (
 BULLISH = "BULLISH"
 BEARISH = "BEARISH"
 NEUTRAL = "NEUTRAL"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PURE-PANDAS TA HELPERS (no external TA library needed)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    """Exponential moving average using pandas ewm."""
+    if len(series) < length:
+        return pd.Series(dtype=float)
+    return series.ewm(span=length, adjust=False).mean()
+
+
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    """Relative Strength Index."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _macd(series: pd.Series, fast: int = 12, slow: int = 26,
+          signal: int = 9) -> pd.DataFrame:
+    """MACD line, signal line, and histogram."""
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return pd.DataFrame({
+        "macd": macd_line, "signal": signal_line, "histogram": histogram,
+    })
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -48,8 +83,8 @@ def compute_emas(df: pd.DataFrame) -> dict[int, float]:
     emas: dict[int, float] = {}
     close = df["close"]
     for p in EMA_PERIODS:
-        series = ta.ema(close, length=p)
-        if series is not None:
+        series = _ema(close, length=p)
+        if not series.empty:
             vals = series.dropna()
             if not vals.empty:
                 emas[p] = round(float(vals.iloc[-1]), 2)
@@ -57,7 +92,7 @@ def compute_emas(df: pd.DataFrame) -> dict[int, float]:
 
 
 def compute_rsi(df: pd.DataFrame) -> Optional[float]:
-    series = ta.rsi(df["close"], length=RSI_PERIOD)
+    series = _rsi(df["close"], length=RSI_PERIOD)
     if series is None:
         return None
     vals = series.dropna()
@@ -65,20 +100,17 @@ def compute_rsi(df: pd.DataFrame) -> Optional[float]:
 
 
 def compute_macd(df: pd.DataFrame) -> Optional[dict]:
-    macd_df = ta.macd(df["close"], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+    macd_df = _macd(df["close"], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
     if macd_df is None or macd_df.empty:
         return None
     latest = macd_df.dropna()
     if latest.empty:
         return None
     row = latest.iloc[-1]
-    mc = f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
-    ms = f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
-    mh = f"MACDh_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
     return {
-        "macd": round(float(row.get(mc, 0)), 2),
-        "signal": round(float(row.get(ms, 0)), 2),
-        "histogram": round(float(row.get(mh, 0)), 2),
+        "macd": round(float(row["macd"]), 2),
+        "signal": round(float(row["signal"]), 2),
+        "histogram": round(float(row["histogram"]), 2),
     }
 
 
