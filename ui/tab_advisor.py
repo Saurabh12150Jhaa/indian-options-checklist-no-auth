@@ -361,7 +361,7 @@ def _render_regime_for_date(target_date: _date, selected_index: str, display_nam
 
 # ── Section 2: Strategy Recommendations ───────────────────────────────────
 
-def _render_recommendations(day_class):
+def _render_recommendations(day_class, key_prefix: str = "live"):
     """Render strategy recommendations based on day classification."""
     st.subheader("Recommended Strategies")
     st.caption(
@@ -401,7 +401,7 @@ def _render_recommendations(day_class):
                 unsafe_allow_html=True,
             )
         with col2:
-            if rec.config and st.button("Load", key=f"rec_load_{i}"):
+            if rec.config and st.button("Load", key=f"rec_load_{key_prefix}_{i}"):
                 st.session_state["custom_strategy"] = rec.config
                 st.success(f"Loaded '{rec.name}' — switch to Strategy Backtester tab to run it.")
 
@@ -811,7 +811,7 @@ def _render_historical_analysis(selected_index: str, display_name: str):
         if analysis.recommendations:
             st.markdown("---")
             st.markdown("### Recommended Strategies for This Day")
-            _render_recommendations(day_class)
+            _render_recommendations(day_class, key_prefix="hist")
 
     # ── OHLC Chart ──
     if analysis.has_ohlc and analysis.ohlc_df is not None:
