@@ -737,12 +737,34 @@ def render() -> None:
                         with st.spinner("Loading bhavcopy data and running backtest..."):
                             options_df = load_multiple_bhavcopies(csv_files, symbol_filter=bt_symbol)
                             if options_df is not None and not options_df.empty:
+                                # Ensure underlying_close exists (old-format bhavcopies lack it)
+                                if "underlying_close" not in options_df.columns or options_df["underlying_close"].isna().all():
+                                    try:
+                                        from backtester.data_adapter import merge_underlying_prices
+                                        from backtester.utils import _fetch_real_ohlc
+                                        ohlc = _fetch_real_ohlc(bt_symbol, bt_start, bt_end)
+                                        if ohlc is not None and not ohlc.empty:
+                                            ohlc = ohlc.rename(columns={"close": "underlying_close"})
+                                            ohlc["date"] = pd.to_datetime(ohlc["date"])
+                                            options_df["date"] = pd.to_datetime(options_df["date"])
+                                            options_df = options_df.merge(
+                                                ohlc[["date", "underlying_close"]].drop_duplicates("date"),
+                                                on="date", how="left", suffixes=("_old", ""),
+                                            )
+                                            if "underlying_close_old" in options_df.columns:
+                                                options_df.drop(columns=["underlying_close_old"], inplace=True)
+                                    except Exception:
+                                        pass  # proceed without underlying — engine handles None
+
                                 data_found = True
                                 # Mark files as accessed so they aren't cleaned up
                                 mark_files_accessed(csv_files)
 
-                                # Get lot size
-                                lot = INDEX_CONFIG.get(bt_symbol, {}).get("lot_size", 25)
+                                # Get lot size — check INDEX_CONFIG first, then FNO_STOCKS
+                                lot = INDEX_CONFIG.get(bt_symbol, {}).get("lot_size", 0)
+                                if lot == 0:
+                                    from config import FNO_STOCKS
+                                    lot = FNO_STOCKS.get(bt_symbol, {}).get("lot_size", 25)
 
                                 config = BacktestConfig(
                                     symbol=bt_symbol, lot_size=lot,

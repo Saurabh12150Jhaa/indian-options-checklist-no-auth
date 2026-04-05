@@ -21,7 +21,7 @@ class TradeResult:
     exit_date: date
     strategy_name: str
     legs: list[dict]  # each: {type, strike, option_type, entry_price, exit_price, qty}
-    entry_premium: float  # net premium received (+) or paid (-)
+    entry_premium: float  # net position value at entry: BUY legs positive, SELL legs negative
     exit_premium: float
     pnl: float
     pnl_pct: float
@@ -223,11 +223,11 @@ class BacktestEngine:
                         current_value += price * multiplier * leg["qty"]
                     
                     entry_value = pos["entry_premium"]
-                    # For credit strategies (positive entry_premium), loss = current > entry
-                    if entry_value > 0:  # credit trade
-                        unrealised_pnl = entry_value - current_value
-                    else:  # debit trade
-                        unrealised_pnl = current_value - abs(entry_value)
+                    # Position value convention: BUY=+, SELL=-
+                    # P&L = change in position value = current - entry
+                    # Credit (entry_value<0): options decay → current less negative → positive P&L
+                    # Debit (entry_value>0): options gain → current more positive → positive P&L
+                    unrealised_pnl = current_value - entry_value
                     
                     if config.stop_loss_pct and unrealised_pnl < 0:
                         loss_pct = abs(unrealised_pnl / abs(entry_value)) * 100 if entry_value != 0 else 0
@@ -265,9 +265,10 @@ class BacktestEngine:
                         })
 
                     entry_prem = pos["entry_premium"]
-                    # PnL: for credit strategies, pnl = entry_premium - exit_cost
-                    # For debit: pnl = exit_value - entry_cost
-                    pnl = entry_prem - exit_premium  # works for both
+                    # PnL = change in position value (exit - entry)
+                    # Credit (entry<0): options decay → exit less negative → positive PnL
+                    # Debit (entry>0): options gain → exit more positive → positive PnL
+                    pnl = exit_premium - entry_prem
                     total_pnl = pnl * config.lot_size
                     equity += total_pnl
 
@@ -329,10 +330,11 @@ class BacktestEngine:
 
                             if valid and legs:
                                 dte = (expiry - dt).days
+                                strat_name = legs[0].get("strategy_name", "Custom")
                                 open_positions.append({
                                     "entry_date": dt,
                                     "expiry": expiry,
-                                    "strategy_name": leg_spec.get("strategy_name", "Custom"),
+                                    "strategy_name": strat_name,
                                     "legs": legs,
                                     "entry_premium": entry_premium,
                                     "dte_at_entry": dte,
