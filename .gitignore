@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .venv/
 .streamlit/secrets.toml
+*.db
+bhavcopy_access.json

@@ -38,6 +38,29 @@ NSE_OPTION_CHAIN_URL = NSE_BASE_URL + "/api/option-chain-indices?symbol={symbol}
 NSE_FII_DII_URL = NSE_BASE_URL + "/api/fiidiiTradeReact"
 NSE_ALL_INDICES_URL = NSE_BASE_URL + "/api/allIndices"
 NSE_MARKET_STATUS_URL = NSE_BASE_URL + "/api/marketStatus"
+NSE_EQUITY_OPTION_CHAIN_URL = NSE_BASE_URL + "/api/option-chain-equities?symbol={symbol}"
+NSE_MARKET_TURNOVER_URL = NSE_BASE_URL + "/api/market-turnover"
+NSE_ADVANCES_DECLINES_URL = NSE_BASE_URL + "/api/market-data-pre-open?key=ALL"
+NSE_TOP_GAINERS_URL = NSE_BASE_URL + "/api/live-analysis-variations?index=gainers"
+NSE_TOP_LOSERS_URL = NSE_BASE_URL + "/api/live-analysis-variations?index=losers"
+NSE_LIVE_INDEX_URL = NSE_BASE_URL + "/api/equity-stockIndices?index={index}"
+NSE_PRE_OPEN_URL = NSE_BASE_URL + "/api/market-data-pre-open?key={key}"
+
+# ── NSE Archive endpoints (bhavcopy) ──────────────────────────────────────
+NSE_FO_BHAVCOPY_URL = (
+    "https://archives.nseindia.com/content/historical/DERIVATIVES"
+    "/{year}/{month}/fo{date}bhav.csv.zip"
+)
+NSE_CM_BHAVCOPY_URL = (
+    "https://archives.nseindia.com/content/historical/EQUITIES"
+    "/{year}/{month}/cm{date}bhav.csv.zip"
+)
+
+# ── Data persistence ──────────────────────────────────────────────────────
+import pathlib as _pathlib
+DATA_DIR = _pathlib.Path.home() / ".indian-options"
+OI_DB_PATH = DATA_DIR / "oi_history.db"
+BHAVCOPY_CACHE_DIR = DATA_DIR / "bhavcopy"
 
 # ── Index definitions ─────────────────────────────────────────────────────
 INDEX_CONFIG = {
@@ -83,3 +106,28 @@ RSI_PERIOD = 14
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
+
+# ── Popular F&O stocks ────────────────────────────────────────────────────
+FNO_STOCKS = {
+    "RELIANCE": {"lot_size": 250, "strike_gap": 20},
+    "TCS": {"lot_size": 175, "strike_gap": 50},
+    "INFY": {"lot_size": 400, "strike_gap": 25},
+    "HDFCBANK": {"lot_size": 550, "strike_gap": 25},
+    "ICICIBANK": {"lot_size": 700, "strike_gap": 25},
+    "SBIN": {"lot_size": 750, "strike_gap": 10},
+    "BHARTIARTL": {"lot_size": 475, "strike_gap": 25},
+    "ITC": {"lot_size": 1600, "strike_gap": 10},
+    "TATAMOTORS": {"lot_size": 1400, "strike_gap": 10},
+    "LT": {"lot_size": 150, "strike_gap": 50},
+    "AXISBANK": {"lot_size": 625, "strike_gap": 25},
+    "KOTAKBANK": {"lot_size": 400, "strike_gap": 25},
+    "BAJFINANCE": {"lot_size": 125, "strike_gap": 100},
+    "MARUTI": {"lot_size": 100, "strike_gap": 100},
+    "TATASTEEL": {"lot_size": 5500, "strike_gap": 5},
+}
+
+# ── Backtester defaults ──────────────────────────────────────────────────
+BACKTEST_DEFAULT_CAPITAL = 500_000  # INR
+BACKTEST_DEFAULT_DTE_MIN = 7
+BACKTEST_DEFAULT_DTE_MAX = 45
+BACKTEST_SLIPPAGE_PCT = 0.5  # % of premium as estimated slippage

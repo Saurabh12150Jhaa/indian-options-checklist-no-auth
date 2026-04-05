@@ -46,19 +46,21 @@ def market_phase() -> str:
 
 def compute_emas(df: pd.DataFrame) -> dict[int, float]:
     emas: dict[int, float] = {}
+    close = df["close"]
     for p in EMA_PERIODS:
-        col = f"EMA_{p}"
-        df[col] = ta.ema(df["close"], length=p)
-        vals = df[col].dropna()
-        if not vals.empty:
-            emas[p] = round(float(vals.iloc[-1]), 2)
+        series = ta.ema(close, length=p)
+        if series is not None:
+            vals = series.dropna()
+            if not vals.empty:
+                emas[p] = round(float(vals.iloc[-1]), 2)
     return emas
 
 
 def compute_rsi(df: pd.DataFrame) -> Optional[float]:
-    col = f"RSI_{RSI_PERIOD}"
-    df[col] = ta.rsi(df["close"], length=RSI_PERIOD)
-    vals = df[col].dropna()
+    series = ta.rsi(df["close"], length=RSI_PERIOD)
+    if series is None:
+        return None
+    vals = series.dropna()
     return round(float(vals.iloc[-1]), 2) if not vals.empty else None
 
 
@@ -81,10 +83,22 @@ def compute_macd(df: pd.DataFrame) -> Optional[dict]:
 
 
 def compute_pivot_points(df: pd.DataFrame) -> Optional[dict]:
+    """
+    Classic pivot points from the *last completed* trading day.
+    During market hours the last row is the current incomplete day,
+    so we use iloc[-2]. After market close, the last row is the
+    completed day itself — still use iloc[-2] to get the *previous*
+    completed day, since pivots should be calculated from yesterday's
+    data to define today's levels. Requires at least 2 rows.
+    """
     if len(df) < 2:
         return None
+    # Always use second-to-last row: during market hours this is yesterday;
+    # after close this is also yesterday (last row = today's completed bar).
     prev = df.iloc[-2]
     h, l, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
+    if h == 0 or l == 0:
+        return None
     pp = (h + l + c) / 3
     return {
         "PP": round(pp, 2),
@@ -429,18 +443,26 @@ def generate_checklist(
 ) -> list[dict]:
     """
     Build the 10-point pre-trade checklist.
-    Each item: {indicator, value, signal, weight}
+    Each item: {indicator, value (str), signal, weight}
+    All values are normalised to str for consistent rendering.
     """
-    spot = technicals.get("spot", 0) or options_data.get("spot", 0)
+    # Prefer NSE spot (real-time) over yfinance spot (delayed)
+    nse_spot = options_data.get("spot", 0)
+    yf_spot = technicals.get("spot", 0)
+    spot = nse_spot if nse_spot else yf_spot
     items = []
 
     # 1. Global Cues
     g_sig = _global_cues_signal(global_df)
-    avg_chg = round(float(global_df["Change %"].mean()), 2) if not global_df.empty else "N/A"
-    items.append({"indicator": "Global Cues", "value": f"Avg {avg_chg}%", "signal": g_sig, "weight": 1.0})
+    if not global_df.empty:
+        avg_chg = round(float(global_df["Change %"].mean()), 2)
+        items.append({"indicator": "Global Cues", "value": f"Avg {avg_chg:+.2f}%", "signal": g_sig, "weight": 1.0})
+    else:
+        items.append({"indicator": "Global Cues", "value": "N/A", "signal": NEUTRAL, "weight": 1.0})
 
     # 2. India VIX
-    items.append({"indicator": "India VIX", "value": vix if vix else "N/A", "signal": _vix_signal(vix), "weight": 1.5})
+    vix_str = f"{vix:.2f}" if vix else "N/A"
+    items.append({"indicator": "India VIX", "value": vix_str, "signal": _vix_signal(vix), "weight": 1.5})
 
     # 3. EMA Trend
     emas = technicals.get("emas", {})
@@ -449,32 +471,35 @@ def generate_checklist(
 
     # 4. RSI
     rsi = technicals.get("rsi")
-    items.append({"indicator": "RSI (14)", "value": rsi if rsi else "N/A", "signal": _rsi_signal(rsi), "weight": 1.0})
+    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+    items.append({"indicator": "RSI (14)", "value": rsi_str, "signal": _rsi_signal(rsi), "weight": 1.0})
 
     # 5. MACD
     macd = technicals.get("macd")
-    hist_val = macd["histogram"] if macd else "N/A"
-    items.append({"indicator": "MACD", "value": f"Hist: {hist_val}", "signal": _macd_signal(macd), "weight": 1.0})
+    hist_str = f"{macd['histogram']:+.2f}" if macd else "N/A"
+    items.append({"indicator": "MACD", "value": f"Hist: {hist_str}", "signal": _macd_signal(macd), "weight": 1.0})
 
     # 6. PCR (OI)
     pcr = options_data.get("pcr_oi")
-    items.append({"indicator": "PCR (OI)", "value": pcr if pcr else "N/A", "signal": _pcr_signal(pcr), "weight": 1.5})
+    pcr_str = f"{pcr:.3f}" if pcr is not None else "N/A"
+    items.append({"indicator": "PCR (OI)", "value": pcr_str, "signal": _pcr_signal(pcr), "weight": 1.5})
 
     # 7. Max Pain
     mp = options_data.get("max_pain")
-    items.append({"indicator": "Max Pain", "value": f"{mp:,.0f}" if mp else "N/A", "signal": _max_pain_signal(spot, mp), "weight": 1.0})
+    mp_str = f"{mp:,.0f} (Spot: {spot:,.0f})" if mp else "N/A"
+    items.append({"indicator": "Max Pain", "value": mp_str, "signal": _max_pain_signal(spot, mp), "weight": 1.0})
 
     # 8. OI Levels
     cs = options_data.get("highest_call_oi_strike")
     ps = options_data.get("highest_put_oi_strike")
-    oi_val = f"S:{ps:,.0f} / R:{cs:,.0f}" if cs and ps else "N/A"
+    oi_val = f"S: {ps:,.0f} / R: {cs:,.0f}" if cs and ps else "N/A"
     items.append({"indicator": "OI Levels", "value": oi_val, "signal": _oi_levels_signal(spot, cs, ps), "weight": 1.5})
 
     # 9. OI Buildup
     buildup_sig = options_data.get("buildup_signal", NEUTRAL)
     cb = options_data.get("call_buildup", 0)
     pb = options_data.get("put_buildup", 0)
-    items.append({"indicator": "OI Buildup", "value": f"C:{cb:+,} P:{pb:+,}", "signal": buildup_sig, "weight": 1.0})
+    items.append({"indicator": "OI Buildup", "value": f"Call: {cb:+,} / Put: {pb:+,}", "signal": buildup_sig, "weight": 1.0})
 
     # 10. FII Activity
     fii_sig = NEUTRAL
