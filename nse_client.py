@@ -15,7 +15,13 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from curl_cffi import requests as curl_requests
+try:
+    from curl_cffi import requests as curl_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    import requests as _fallback_requests
+    curl_requests = _fallback_requests  # type: ignore[assignment]
+    _HAS_CURL_CFFI = False
 
 from config import NSE_BASE_URL
 
@@ -42,7 +48,18 @@ class NSEClient:
     # ── Session lifecycle ──────────────────────────────────────────────────
 
     def _new_session(self) -> curl_requests.Session:
-        return curl_requests.Session(impersonate="chrome")
+        if _HAS_CURL_CFFI:
+            return curl_requests.Session(impersonate="chrome")
+        # Fallback: standard requests session (no TLS impersonation)
+        sess = curl_requests.Session()
+        sess.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        })
+        return sess
 
     def _refresh_cookies(self) -> None:
         """Visit an NSE page to obtain fresh Akamai cookies."""
