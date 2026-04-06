@@ -657,7 +657,7 @@ def render() -> None:
 
             if use_custom:
                 st.json(use_custom)
-                st.success(f"Custom strategy: {use_custom['name']}")
+                st.success(f"Custom strategy: {use_custom.get('name', 'Custom Strategy')}")
             else:
                 strat_info = filtered_strats.get(sel_strategy, {})
                 st.markdown(f"**Strategy:** {sel_strategy}")
@@ -790,7 +790,7 @@ def render() -> None:
                                     st.session_state["backtest_results"] = {
                                         "report": report,
                                         "config": config,
-                                        "strategy_name": use_custom["name"] if use_custom else sel_strategy,
+                                        "strategy_name": use_custom.get("name", "Custom Strategy") if use_custom else sel_strategy,
                                         "symbol": bt_symbol,
                                         "start": str(bt_start),
                                         "end": str(bt_end),
