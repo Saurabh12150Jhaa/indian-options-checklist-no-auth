@@ -156,7 +156,8 @@ def _standardise(df: pd.DataFrame) -> Optional[pd.DataFrame]:
                 df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
 
     # Ensure numeric columns
-    for num_col in ["strike", "open", "high", "low", "close", "settle", "oi", "chg_oi"]:
+    for num_col in ["strike", "open", "high", "low", "close", "settle", "oi", "chg_oi",
+                     "contracts", "value_lakhs", "underlying_close"]:
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
 

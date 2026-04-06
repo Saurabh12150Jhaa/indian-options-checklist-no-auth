@@ -4,19 +4,36 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Cache for yfinance OHLC to avoid repeated downloads within a session
+# Cache for yfinance OHLC to avoid repeated downloads within a session.
+# Keyed by symbol → full DataFrame so a single download covers the
+# entire backtest period.
 _yf_ohlc_cache: dict[str, pd.DataFrame] = {}
 
 
 def _fetch_real_ohlc(symbol: str, start: date, end: date) -> Optional[pd.DataFrame]:
-    """Fetch real daily OHLC from yfinance for the underlying index."""
-    cache_key = f"{symbol}_{start}_{end}"
-    if cache_key in _yf_ohlc_cache:
-        return _yf_ohlc_cache[cache_key]
+    """Fetch real daily OHLC from yfinance for the underlying index.
+
+    Uses a per-symbol cache so only one download is needed per backtest
+    session.  If the cached data already covers the requested range it is
+    reused; otherwise we fetch a wider window (earliest start to latest
+    end ever requested) so subsequent calls for different dates hit the
+    cache.
+    """
+    if symbol in _yf_ohlc_cache:
+        cached = _yf_ohlc_cache[symbol]
+        if not cached.empty:
+            cached_min = cached["date"].min()
+            cached_max = cached["date"].max()
+            if cached_min <= start and cached_max >= end:
+                return cached
+            # Widen the window to cover old + new range
+            start = min(start, cached_min)
+            end = max(end, cached_max)
 
     try:
         from config import INDEX_CONFIG
@@ -28,7 +45,11 @@ def _fetch_real_ohlc(symbol: str, start: date, end: date) -> Optional[pd.DataFra
 
         ticker = cfg["yf_ticker"]
         tk = yf.Ticker(ticker)
-        df = tk.history(start=str(start), end=str(end + timedelta(days=1)))
+        # Add buffer on both ends
+        df = tk.history(
+            start=str(start - timedelta(days=7)),
+            end=str(end + timedelta(days=7)),
+        )
         if df.empty:
             return None
 
@@ -36,62 +57,56 @@ def _fetch_real_ohlc(symbol: str, start: date, end: date) -> Optional[pd.DataFra
         df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
         df["date"] = pd.to_datetime(df["date"]).dt.date
         result = df[["date", "open", "high", "low", "close"]].copy()
-        _yf_ohlc_cache[cache_key] = result
+        _yf_ohlc_cache[symbol] = result
         return result
     except Exception as e:
         logger.debug("yfinance OHLC fetch failed for %s: %s", symbol, e)
         return None
 
 
-def get_recent_ohlc(engine, dt: date, lookback: int = 50) -> Optional[pd.DataFrame]:
-    """
-    Extract recent underlying OHLC for technical analysis.
+def _build_bhavcopy_ohlc(engine) -> Optional[pd.DataFrame]:
+    """Derive approximate OHLC from bhavcopy underlying_close data.
 
-    First attempts to fetch REAL OHLC from yfinance. Falls back to
-    deriving approximate OHLC from bhavcopy option data if the new-format
-    underlying_close column and option OHLC data are available, and uses
-    synthetic close-only OHLC as a last resort.
+    Bhavcopies only provide a single underlying close per day.  We
+    synthesise approximate high/low by looking at ATM option prices and
+    implied ranges when possible, and fall back to adding a small
+    synthetic spread around the close to ensure candle-based indicators
+    get non-degenerate (non-flat) bars.
     """
-    # Attempt 1: Real OHLC from yfinance
-    symbol = engine.config.symbol
-    start = dt - timedelta(days=lookback * 2)  # buffer for holidays
-    real_ohlc = _fetch_real_ohlc(symbol, start, dt)
-    if real_ohlc is not None and not real_ohlc.empty:
-        filtered = real_ohlc[real_ohlc["date"] <= dt].tail(lookback)
-        if len(filtered) >= 10:
-            return filtered.reset_index(drop=True)
-
-    # Attempt 2: Derive from bhavcopy data if available
-    # New-format bhavcopies include UndrlygPric (underlying_close) — but that's
-    # just a single price.  However, the *options* rows themselves have OHLC
-    # that can hint at the underlying range via ATM put-call parity.
-    # For simplicity, we use the underlying_close but try to get a better
-    # open/high/low from the data_adapter if underlying columns exist.
-    dates = [d for d in engine.trading_dates if d <= dt][-lookback:]
-    if len(dates) < 10:
+    dates = engine.trading_dates
+    if len(dates) < 3:
         return None
 
     rows = []
     for d in dates:
         price = engine.get_underlying_price(d)
-        if not price:
+        if not price or price <= 0:
             continue
 
-        # Try to get real OHLC from the options data
-        # Some bhavcopy formats have futures data with real OHLC
         chain = engine.get_chain_on_date(d)
+        day_open = price
         day_high = price
         day_low = price
-        day_open = price
 
-        if not chain.empty and "underlying_close" in chain.columns:
-            # Use the range of option underlying prices as a proxy
-            u_prices = chain["underlying_close"].dropna()
-            if not u_prices.empty:
-                price = float(u_prices.iloc[0])
-                day_open = price
-                day_high = price
-                day_low = price
+        if not chain.empty:
+            # Estimate intraday range from ATM straddle prices.
+            # ATM straddle premium ≈ 0.8 × σ_daily × spot (empirical).
+            # We use that to create a synthetic high/low.
+            ce = chain[chain["option_type"] == "CE"]
+            pe = chain[chain["option_type"] == "PE"]
+            if not ce.empty and not pe.empty:
+                ce_atm_idx = (ce["strike"] - price).abs().idxmin()
+                pe_atm_idx = (pe["strike"] - price).abs().idxmin()
+                ce_price = float(ce.loc[ce_atm_idx, "close"])
+                pe_price = float(pe.loc[pe_atm_idx, "close"])
+                straddle = ce_price + pe_price
+                # Estimated daily range ≈ straddle × 0.6 (rough)
+                half_range = straddle * 0.3
+                if half_range > 0:
+                    day_high = price + half_range
+                    day_low = price - half_range
+                    # Approximate open as midpoint with a small shift
+                    day_open = price - half_range * 0.1  # slight offset
 
         rows.append({
             "date": d,
@@ -101,6 +116,43 @@ def get_recent_ohlc(engine, dt: date, lookback: int = 50) -> Optional[pd.DataFra
             "close": price,
         })
 
-    if len(rows) < 10:
+    if len(rows) < 3:
         return None
     return pd.DataFrame(rows)
+
+
+# Engine-level cache for bhavcopy-derived OHLC
+_bhavcopy_ohlc_cache: dict[int, Optional[pd.DataFrame]] = {}
+
+
+def get_recent_ohlc(engine, dt: date, lookback: int = 50) -> Optional[pd.DataFrame]:
+    """
+    Extract recent underlying OHLC for technical analysis.
+
+    Strategy:
+    1. Try yfinance (one download for the full period, then filter).
+    2. Fall back to bhavcopy-derived OHLC (synthesised from option data).
+    3. Return None only if neither source has enough data.
+    """
+    symbol = engine.config.symbol
+
+    # Attempt 1: Real OHLC from yfinance (single fetch covers full period)
+    start = dt - timedelta(days=lookback * 2)
+    real_ohlc = _fetch_real_ohlc(symbol, start, dt)
+    if real_ohlc is not None and not real_ohlc.empty:
+        filtered = real_ohlc[real_ohlc["date"] <= dt].tail(lookback)
+        if len(filtered) >= 10:
+            return filtered.reset_index(drop=True)
+
+    # Attempt 2: Bhavcopy-derived OHLC (cached per engine instance)
+    eid = id(engine)
+    if eid not in _bhavcopy_ohlc_cache:
+        _bhavcopy_ohlc_cache[eid] = _build_bhavcopy_ohlc(engine)
+    bhav_ohlc = _bhavcopy_ohlc_cache[eid]
+
+    if bhav_ohlc is not None and not bhav_ohlc.empty:
+        filtered = bhav_ohlc[bhav_ohlc["date"] <= dt].tail(lookback)
+        if len(filtered) >= 5:  # lower threshold for bhavcopy data
+            return filtered.reset_index(drop=True)
+
+    return None

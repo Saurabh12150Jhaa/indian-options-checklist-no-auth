@@ -798,6 +798,16 @@ def render() -> None:
 
                                     # Display results
                                     st.subheader("Backtest Results")
+                                    if report.total_trades == 0 and use_custom:
+                                        st.warning(
+                                            "**No trades were generated.** The custom strategy's entry "
+                                            "conditions were never satisfied during the backtest period. "
+                                            "Try:\n"
+                                            "- Widening the date range\n"
+                                            "- Relaxing the entry conditions (e.g. RSI threshold, EMA periods)\n"
+                                            "- Removing one or more conditions\n"
+                                            "- Using a different DTE range"
+                                        )
                                     _render_backtest_results(report, config)
             except ImportError as e:
                 st.caption(f"Backtest engine: {e}")
