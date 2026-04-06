@@ -120,11 +120,24 @@ def _eval_candle_pattern(ohlc: pd.DataFrame, params: dict) -> bool:
 
 
 def _eval_pcr(chain: pd.DataFrame, params: dict) -> bool:
-    """Check PCR condition. params: {operator, value}"""
+    """Check PCR condition. params: {operator, value}
+
+    Handles two data formats:
+      - NSE API format: columns ``put_oi`` / ``call_oi``
+      - Bhavcopy format: per-row ``oi`` with ``option_type`` = CE/PE
+    """
     if chain.empty:
         return False
-    total_put = chain["put_oi"].sum() if "put_oi" in chain.columns else 0
-    total_call = chain["call_oi"].sum() if "call_oi" in chain.columns else 0
+
+    if "put_oi" in chain.columns and "call_oi" in chain.columns:
+        total_put = chain["put_oi"].sum()
+        total_call = chain["call_oi"].sum()
+    elif "oi" in chain.columns and "option_type" in chain.columns:
+        total_put = chain.loc[chain["option_type"] == "PE", "oi"].sum()
+        total_call = chain.loc[chain["option_type"] == "CE", "oi"].sum()
+    else:
+        return False
+
     if total_call == 0:
         return False
     pcr = total_put / total_call
@@ -132,16 +145,49 @@ def _eval_pcr(chain: pd.DataFrame, params: dict) -> bool:
 
 
 def _eval_iv_rank(chain: pd.DataFrame, spot: float, params: dict) -> bool:
-    """Check if ATM IV is above/below threshold. params: {operator, value}"""
-    if chain.empty or "call_iv" not in chain.columns:
+    """Check if ATM IV is above/below threshold. params: {operator, value}
+
+    Handles two data formats:
+      - NSE API format: ``call_iv`` column with explicit IV values
+      - Bhavcopy format: estimate IV from ATM straddle price using
+        Brenner-Subrahmanyam approximation (IV ≈ straddle / (0.8 × spot) × sqrt(365/DTE))
+    """
+    if chain.empty:
         return False
+
     chain = chain.copy()
     chain["_dist"] = (chain["strike"] - spot).abs()
-    atm = chain.nsmallest(3, "_dist")
-    avg_iv = atm["call_iv"].mean()
-    if pd.isna(avg_iv):
-        return False
-    return _compare(avg_iv, params.get("operator", ">"), params.get("value", 15))
+
+    # Approach 1: explicit IV column
+    if "call_iv" in chain.columns:
+        atm = chain.nsmallest(3, "_dist")
+        avg_iv = atm["call_iv"].mean()
+        if pd.notna(avg_iv):
+            return _compare(avg_iv, params.get("operator", ">"), params.get("value", 15))
+
+    # Approach 2: estimate from ATM straddle price (bhavcopy format)
+    if "option_type" in chain.columns and "close" in chain.columns:
+        ce = chain[chain["option_type"] == "CE"]
+        pe = chain[chain["option_type"] == "PE"]
+        if not ce.empty and not pe.empty:
+            ce_atm_idx = (ce["strike"] - spot).abs().idxmin()
+            pe_atm_idx = (pe["strike"] - spot).abs().idxmin()
+            ce_price = float(ce.loc[ce_atm_idx, "close"])
+            pe_price = float(pe.loc[pe_atm_idx, "close"])
+            straddle = ce_price + pe_price
+            if spot > 0 and straddle > 0:
+                # Get DTE for annualisation
+                dte = 30  # default assumption
+                if "dte" in chain.columns:
+                    dte_vals = chain["dte"].dropna()
+                    if not dte_vals.empty:
+                        dte = max(int(dte_vals.iloc[0]), 1)
+                # Brenner-Subrahmanyam: σ ≈ straddle / (0.8 × S × √(T))
+                t_years = dte / 365.0
+                approx_iv = (straddle / (0.8 * spot * (t_years ** 0.5))) * 100
+                return _compare(approx_iv, params.get("operator", ">"), params.get("value", 15))
+
+    return False
 
 
 def _eval_day_of_week(dt: date, params: dict) -> bool:
@@ -238,12 +284,24 @@ def _eval_vwap(ohlc: pd.DataFrame, params: dict) -> bool:
 
 
 def _eval_oi_change(chain: pd.DataFrame, params: dict) -> bool:
-    """OI buildup analysis. params: {buildup}"""
+    """OI buildup analysis. params: {buildup}
+
+    Handles two data formats:
+      - NSE API format: columns ``call_chg_oi`` / ``put_chg_oi``
+      - Bhavcopy format: per-row ``chg_oi`` with ``option_type`` = CE/PE
+    """
     if chain.empty:
         return False
     buildup = params.get("buildup", "put_writing")
-    call_chg = chain["call_chg_oi"].sum() if "call_chg_oi" in chain.columns else 0
-    put_chg = chain["put_chg_oi"].sum() if "put_chg_oi" in chain.columns else 0
+
+    if "call_chg_oi" in chain.columns and "put_chg_oi" in chain.columns:
+        call_chg = chain["call_chg_oi"].sum()
+        put_chg = chain["put_chg_oi"].sum()
+    elif "chg_oi" in chain.columns and "option_type" in chain.columns:
+        call_chg = chain.loc[chain["option_type"] == "CE", "chg_oi"].sum()
+        put_chg = chain.loc[chain["option_type"] == "PE", "chg_oi"].sum()
+    else:
+        return False
     if buildup == "call_writing":
         return call_chg > 0 and call_chg > put_chg
     elif buildup == "put_writing":
