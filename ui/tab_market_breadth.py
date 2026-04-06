@@ -177,7 +177,7 @@ def render() -> None:
                         "Change": "{:+.2f}",
                         "Change %": "{:+.2f}",
                         "Volume": "{:,.0f}",
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #66bb6a" if isinstance(v, (int, float)) and v > 0 else "",
                         subset=["Change %"],
                     ),
@@ -197,7 +197,7 @@ def render() -> None:
                         "Change": "{:+.2f}",
                         "Change %": "{:+.2f}",
                         "Volume": "{:,.0f}",
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #ef5350" if isinstance(v, (int, float)) and v < 0 else "",
                         subset=["Change %"],
                     ),
