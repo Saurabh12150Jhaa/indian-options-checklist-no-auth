@@ -248,7 +248,8 @@ def render() -> None:
         from backtester.price_action import PA_STRATEGIES
         from backtester.custom_strategy import (
             CustomStrategy, CUSTOM_PRESETS, CONDITION_REGISTRY, LEG_TEMPLATES,
-            describe_strategy,
+            describe_strategy, is_comprehensive_strategy_doc,
+            convert_comprehensive_strategy,
         )
 
         # Combine all strategies
@@ -559,10 +560,52 @@ def render() -> None:
                     if uploaded:
                         try:
                             imported = json.loads(uploaded.read())
-                            st.session_state["custom_strategy"] = imported
-                            st.success(f"Imported: {imported.get('name', 'Unknown')}")
+                            if is_comprehensive_strategy_doc(imported):
+                                # Comprehensive strategy document — extract sub-strategies
+                                converted = convert_comprehensive_strategy(imported)
+                                if converted:
+                                    st.session_state["_imported_strategies"] = converted
+                                    meta = imported.get("strategy_meta", {})
+                                    doc_name = meta.get("name", "Strategy Document")
+                                    st.info(
+                                        f"Detected comprehensive strategy document: **{doc_name}** "
+                                        f"with {len(converted)} sub-strategies. Select one below."
+                                    )
+                                else:
+                                    st.error(
+                                        "Comprehensive strategy document detected but no backtestable "
+                                        "sub-strategies could be extracted. Ensure your JSON has a "
+                                        "'strategies' key with individual strategy objects."
+                                    )
+                            else:
+                                st.session_state["custom_strategy"] = imported
+                                st.success(f"Imported: {imported.get('name', 'Unknown')}")
                         except Exception as e:
                             st.error(f"Invalid JSON: {e}")
+
+                # Sub-strategy picker for comprehensive documents
+                if "_imported_strategies" in st.session_state:
+                    imported_strats = st.session_state["_imported_strategies"]
+                    strat_names = list(imported_strats.keys())
+                    st.markdown("##### Select a sub-strategy to backtest")
+                    picked = st.selectbox(
+                        "Sub-strategy",
+                        strat_names,
+                        key="imported_strat_pick",
+                    )
+                    if picked:
+                        preview = describe_strategy(imported_strats[picked])
+                        st.caption(preview)
+                    ic1, ic2 = st.columns(2)
+                    with ic1:
+                        if st.button("Use this strategy", key="use_imported_sub"):
+                            st.session_state["custom_strategy"] = imported_strats[picked]
+                            del st.session_state["_imported_strategies"]
+                            st.rerun()
+                    with ic2:
+                        if st.button("Dismiss", key="dismiss_imported"):
+                            del st.session_state["_imported_strategies"]
+                            st.rerun()
 
         # Show active custom strategy if set
         active_custom = st.session_state.get("custom_strategy")

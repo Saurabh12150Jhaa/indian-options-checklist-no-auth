@@ -11,6 +11,7 @@ that works with the BacktestEngine.
 """
 
 import logging
+import re
 from datetime import date
 from typing import Optional
 
@@ -881,6 +882,250 @@ CUSTOM_PRESETS = {
 # ══════════════════════════════════════════════════════════════════════════
 #  STRATEGY DESCRIPTION HELPERS
 # ══════════════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  COMPREHENSIVE STRATEGY DOCUMENT CONVERTER
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def is_comprehensive_strategy_doc(data: dict) -> bool:
+    """Check if the JSON is a comprehensive strategy document (not a backtester config).
+
+    A comprehensive doc has top-level keys like ``strategies``, ``strategy_meta``,
+    ``risk_management``, etc. — as opposed to ``conditions``/``legs`` expected by
+    the backtester.
+    """
+    if "conditions" in data or "condition_groups" in data or "legs" in data:
+        return False
+    return "strategies" in data or "strategy_meta" in data
+
+
+def _map_strategy_entry(key: str, strat: dict) -> Optional[dict]:
+    """Convert a single sub-strategy from comprehensive format to backtester format.
+
+    This maps human-readable entry rules, strike selection, and strategy type
+    into structured ``conditions`` + ``legs`` that :class:`CustomStrategy` expects.
+    """
+    name = strat.get("name", key.replace("_", " ").title())
+    stype = strat.get("type", "")
+    conditions: list[dict] = []
+    legs: list[dict] = []
+
+    # ── Extract conditions from entry_rules ──────────────────────────
+    entry = strat.get("entry_rules", {})
+    tech = entry.get("technical_confirmation", [])
+
+    # RSI mentions
+    for rule in tech if isinstance(tech, list) else []:
+        rule_lower = rule.lower()
+        if "rsi" in rule_lower:
+            if "above 60" in rule_lower or "crosses above 60" in rule_lower:
+                conditions.append({"type": "rsi", "params": {"period": 14, "operator": ">", "value": 60}})
+            elif "below 40" in rule_lower or "crosses below 40" in rule_lower:
+                conditions.append({"type": "rsi", "params": {"period": 14, "operator": "<", "value": 40}})
+            elif "divergence" in rule_lower:
+                conditions.append({"type": "rsi", "params": {"period": 14, "operator": "<", "value": 35}})
+        if "ema" in rule_lower and "above" in rule_lower:
+            # Extract EMA period if present
+            m = re.search(r"(\d+)\s*ema", rule_lower)
+            period = int(m.group(1)) if m else 20
+            conditions.append({"type": "price_vs_ema", "params": {"period": period, "position": "above"}})
+        elif "ema" in rule_lower and "below" in rule_lower:
+            m = re.search(r"(\d+)\s*ema", rule_lower)
+            period = int(m.group(1)) if m else 20
+            conditions.append({"type": "price_vs_ema", "params": {"period": period, "position": "below"}})
+        if "supertrend" in rule_lower:
+            m = re.search(r"supertrend\s*\((\d+)\s*,\s*([\d.]+)\)", rule_lower)
+            period = int(m.group(1)) if m else 10
+            mult = float(m.group(2)) if m else 3.0
+            signal = "bullish" if "bullish" in rule_lower or "confirms" in rule_lower else "bearish"
+            conditions.append({"type": "supertrend", "params": {"period": period, "multiplier": mult, "signal": signal}})
+        if "vwap" in rule_lower:
+            pos = "above" if "above" in rule_lower or "breaks above" in rule_lower else "below"
+            conditions.append({"type": "vwap", "params": {"position": pos}})
+
+    # Check best_conditions for VIX / market type hints
+    best = strat.get("best_conditions", [])
+    for bc in best if isinstance(best, list) else []:
+        bc_lower = bc.lower()
+        if "vix" in bc_lower:
+            m = re.search(r"vix\s*[<>]?\s*(\d+)", bc_lower)
+            if m:
+                val = int(m.group(1))
+                op = "<" if "<" in bc_lower else ">"
+                # VIX range like "VIX 12-20"
+                m2 = re.search(r"vix\s+(\d+)\s*-\s*(\d+)", bc_lower)
+                if m2:
+                    val = int(m2.group(2))
+                    op = "<"
+                conditions.append({"type": "iv_rank", "params": {"operator": op, "value": val}})
+        if "expiry" in bc_lower or "thursday" in bc_lower:
+            conditions.append({"type": "day_of_week", "params": {"days": ["thu"]}})
+        if "range-bound" in bc_lower or "range bound" in bc_lower:
+            # Only add ADX filter for selling strategies — for buying strategies
+            # "range-bound" is a market context note, not a hard entry condition.
+            if "selling" in stype or "hedged" in stype:
+                conditions.append({"type": "trend_strength", "params": {"period": 14, "operator": "<", "value": 20}})
+
+    # Strategy-time entry (e.g., "09:25 - 09:35 IST") — not usable in backtest, skip
+
+    # PCR condition from entry_rules
+    if "pcr" in str(entry).lower():
+        pcr_data = strat.get("entry_rules", {})
+        # Check if there's max_pain_within_range or similar
+        conditions.append({"type": "pcr", "params": {"operator": ">", "value": 0.8}})
+
+    # Gap condition
+    if entry.get("bullish", "") and "closes above" in entry.get("bullish", "").lower():
+        conditions.append({"type": "gap", "params": {"direction": "up", "min_pct": 0.3}})
+    if entry.get("bearish", "") and "closes below" in entry.get("bearish", "").lower():
+        pass  # Covered by bullish variant
+
+    # Reversal candle for VWAP reversion
+    if "reversal_candle" in entry:
+        conditions.append({"type": "candle_pattern", "params": {"pattern": "engulfing", "direction": "BULLISH"}})
+
+    # Deviation from VWAP
+    deviation = entry.get("deviation", "")
+    if "vwap" in str(deviation).lower():
+        conditions.append({"type": "vwap", "params": {"position": "below"}})
+
+    # ── Extract legs from strike_selection and strategy structure ─────
+    strike_sel = strat.get("strike_selection", {})
+    explicit_legs = strat.get("legs", [])
+
+    if explicit_legs and isinstance(explicit_legs, list):
+        # Strategy has explicit leg definitions (e.g., short straddle, iron condor)
+        for leg_def in explicit_legs:
+            if isinstance(leg_def, dict):
+                action = leg_def.get("action", "BUY")
+                otype = leg_def.get("type", "CE")
+                strike_desc = leg_def.get("strike", "ATM")
+                lots = leg_def.get("lots", 1)
+
+                # Map strike descriptions to templates
+                template = _strike_desc_to_template(strike_desc, otype)
+                legs.append({"template": template, "action": action, "qty": lots})
+    elif isinstance(strike_sel, dict) and strike_sel:
+        # Infer from strike_selection
+        if "buy_atm_or_1_strike_otm" in strike_sel:
+            legs.append({"template": "atm_call", "action": "BUY", "qty": 1})
+        elif "call" in strike_sel or "put" in strike_sel:
+            # Momentum / directional
+            if "premium_selling" in stype:
+                legs.append({"template": "otm_call_1", "action": "SELL", "qty": 1})
+                legs.append({"template": "otm_put_1", "action": "SELL", "qty": 1})
+            else:
+                legs.append({"template": "otm_call_half", "action": "BUY", "qty": 1})
+    elif strike_sel and isinstance(strike_sel, str):
+        # Simple string like "ATM option in the reversal direction"
+        if "atm" in strike_sel.lower():
+            legs.append({"template": "atm_call", "action": "BUY", "qty": 1})
+
+    # Fallback: infer from strategy type
+    if not legs:
+        if "straddle" in stype or "straddle" in name.lower():
+            legs = [
+                {"template": "atm_call", "action": "SELL", "qty": 1},
+                {"template": "atm_put", "action": "SELL", "qty": 1},
+            ]
+        elif "strangle" in stype or "strangle" in name.lower():
+            legs = [
+                {"template": "otm_call_1", "action": "SELL", "qty": 1},
+                {"template": "otm_put_1", "action": "SELL", "qty": 1},
+            ]
+        elif "iron_condor" in stype or "iron condor" in name.lower():
+            legs = [
+                {"template": "otm_call_half", "action": "SELL", "qty": 1},
+                {"template": "otm_call_1", "action": "BUY", "qty": 1},
+                {"template": "otm_put_half", "action": "SELL", "qty": 1},
+                {"template": "otm_put_1", "action": "BUY", "qty": 1},
+            ]
+        elif "premium_selling" in stype:
+            legs = [
+                {"template": "otm_call_1", "action": "SELL", "qty": 1},
+                {"template": "otm_put_1", "action": "SELL", "qty": 1},
+            ]
+        elif "buying" in stype or "directional" in stype:
+            legs = [{"template": "otm_call_half", "action": "BUY", "qty": 1}]
+        else:
+            legs = [{"template": "atm_call", "action": "BUY", "qty": 1}]
+
+    # Deduplicate conditions (same type+params)
+    seen = set()
+    deduped = []
+    for c in conditions:
+        key = (c["type"], str(sorted(c.get("params", {}).items())))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    conditions = deduped
+
+    return {
+        "name": name,
+        "conditions": conditions,
+        "condition_logic": "AND",
+        "legs": legs,
+    }
+
+
+def _strike_desc_to_template(strike_desc: str, option_type: str) -> str:
+    """Map a human-readable strike description to a LEG_TEMPLATES key."""
+    s = strike_desc.lower().strip()
+    otype = option_type.upper()
+
+    if s == "atm" or "atm" in s and ("+" not in s and "-" not in s):
+        return "atm_call" if otype == "CE" else "atm_put"
+
+    # Match patterns like "ATM + 200" or "ATM - 500"
+    m = re.search(r"atm\s*([+-])\s*(\d+)", s)
+    if m:
+        sign = m.group(1)
+        points = int(m.group(2))
+        # Rough mapping: 100-200pts ≈ 1%, 200-400pts ≈ 2%, 400+ ≈ 4%
+        if points <= 150:
+            suffix = "half"
+        elif points <= 300:
+            suffix = "1"
+        elif points <= 500:
+            suffix = "3pct"
+        else:
+            suffix = "2"
+
+        if otype == "CE":
+            if sign == "+":
+                return f"otm_call_{suffix}"
+            else:
+                return f"itm_call" if suffix in ("half", "1") else "deep_itm_call"
+        else:
+            if sign == "-":
+                return f"otm_put_{suffix}"
+            else:
+                return f"itm_put" if suffix in ("half", "1") else "deep_itm_put"
+
+    # Default
+    return "atm_call" if otype == "CE" else "atm_put"
+
+
+def convert_comprehensive_strategy(data: dict) -> dict[str, dict]:
+    """Extract backtestable strategies from a comprehensive strategy document.
+
+    Returns a dict mapping strategy names to backtester-compatible configs.
+    """
+    strategies_raw = data.get("strategies", {})
+    if not strategies_raw:
+        return {}
+
+    result = {}
+    for key, strat in strategies_raw.items():
+        if not isinstance(strat, dict):
+            continue
+        converted = _map_strategy_entry(key, strat)
+        if converted:
+            result[converted["name"]] = converted
+
+    return result
 
 
 def _describe_condition(ctype: str, params: dict) -> str:
