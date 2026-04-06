@@ -72,8 +72,14 @@ def render(selected_index: str, display_name: str) -> None:
 
             # OI Timeline (from tracker)
             st.subheader("OI Change Timeline (Intraday)")
-            agg_tl = get_aggregate_oi_timeline(selected_index, deep_expiry)
-            if not agg_tl.empty:
+
+            from datetime import date as _date
+            today_str = _date.today().isoformat()
+            today_tracked = today_str in tracked if tracked else False
+
+            agg_tl = get_aggregate_oi_timeline(selected_index, deep_expiry, trade_date=_date.today())
+            if not agg_tl.empty and len(agg_tl) >= 2:
+                st.caption(f"{len(agg_tl)} snapshots captured today")
                 tl_fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                                        subplot_titles=("Total OI", "PCR Over Time"), vertical_spacing=0.12)
                 tl_fig.add_trace(go.Scatter(x=agg_tl["timestamp"], y=agg_tl["total_call_oi"], name="Call OI", line=dict(color="#ef5350")), row=1, col=1)
@@ -83,7 +89,14 @@ def render(selected_index: str, display_name: str) -> None:
                 tl_fig.update_layout(height=500, template="plotly_dark", margin=dict(l=40, r=20, t=40, b=30))
                 st.plotly_chart(tl_fig, width="stretch")
             else:
-                st.info("OI timeline data will appear after multiple refreshes capture snapshots over time.")
+                snap_count = len(agg_tl) if not agg_tl.empty else 0
+                st.info(
+                    f"OI timeline needs at least 2 snapshots to plot a chart "
+                    f"(currently {snap_count} today). Each time you visit the "
+                    f"**Pre-Trade Checklist** tab, an OI snapshot is automatically "
+                    f"saved. Refresh the Checklist tab a few times over the trading "
+                    f"day to build up the intraday OI timeline."
+                )
 
             # ITM/OTM Analysis
             if nse_data and deep_expiry:

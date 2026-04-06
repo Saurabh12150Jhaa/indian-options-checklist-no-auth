@@ -777,6 +777,13 @@ def analyze_date(
                                 f"{target_date} is a {'Saturday' if wd == 5 else 'Sunday'} "
                                 f"— no F&O trading data available."
                             )
+                        elif target_date == date.today():
+                            analysis.warnings.append(
+                                f"Bhavcopy for today ({target_date}) is not yet "
+                                f"available — NSE publishes it after market close "
+                                f"(~6 PM IST). Live options data from the Options "
+                                f"Chain tab is used instead."
+                            )
                         else:
                             analysis.warnings.append(
                                 f"No bhavcopy available for {target_date}. "

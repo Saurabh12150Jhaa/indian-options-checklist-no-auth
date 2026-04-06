@@ -711,6 +711,8 @@ def _render_historical_analysis(selected_index: str, display_name: str):
             # Use appropriate severity based on message content
             if "holiday" in w.lower() or "weekend" in w.lower() or "saturday" in w.lower() or "sunday" in w.lower():
                 st.info(w)
+            elif "not yet available" in w.lower():
+                st.info(w)
             elif "not available" in w.lower() or "not yet published" in w.lower():
                 st.warning(w)
             elif "error" in w.lower() or "failed" in w.lower():

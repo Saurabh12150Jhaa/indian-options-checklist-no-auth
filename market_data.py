@@ -7,4 +7,5 @@ from services.market_data import (  # noqa: F401
     fetch_market_turnover,
     fetch_live_index,
     fetch_pre_open,
+    fetch_sector_performance,
 )

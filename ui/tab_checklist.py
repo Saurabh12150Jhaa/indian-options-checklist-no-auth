@@ -116,12 +116,12 @@ def render(selected_index: str, display_name: str, timeframe: str) -> None:
             chart_df = hist_df.tail(120).copy()
             chart_title = f"{display_name} — Daily (last 120 sessions)"
 
-        # Build the main chart with subplots: candlestick + RSI + MACD
+        # Build the main chart with subplots: candlestick + volume + RSI + MACD
         tech_fig = make_subplots(
-            rows=3, cols=1, shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.6, 0.2, 0.2],
-            subplot_titles=("", "RSI (14)", "MACD"),
+            rows=4, cols=1, shared_xaxes=True,
+            vertical_spacing=0.025,
+            row_heights=[0.50, 0.12, 0.19, 0.19],
+            subplot_titles=("", "Volume", "RSI (14)", "MACD"),
         )
 
         # 1) Candlestick
@@ -148,6 +148,37 @@ def render(selected_index: str, display_name: str, timeframe: str) -> None:
                     ),
                     row=1, col=1,
                 )
+
+        # 2b) VWAP (intraday only)
+        if chart_source == "Intraday" and "volume" in chart_df.columns:
+            cum_vol = chart_df["volume"].cumsum()
+            cum_vwap = (chart_df["close"] * chart_df["volume"]).cumsum()
+            vwap = cum_vwap / cum_vol.replace(0, float("nan"))
+            if not vwap.dropna().empty:
+                tech_fig.add_trace(
+                    go.Scatter(
+                        x=chart_df.index, y=vwap,
+                        mode="lines", name="VWAP",
+                        line=dict(color="#00e5ff", width=1.5, dash="dot"),
+                    ),
+                    row=1, col=1,
+                )
+
+        # 2c) Volume bars
+        if "volume" in chart_df.columns:
+            vol_colors = [
+                "#66bb6a" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i]
+                else "#ef5350"
+                for i in range(len(chart_df))
+            ]
+            tech_fig.add_trace(
+                go.Bar(
+                    x=chart_df.index, y=chart_df["volume"],
+                    name="Volume", marker_color=vol_colors, opacity=0.6,
+                    showlegend=False,
+                ),
+                row=2, col=1,
+            )
 
         # 3) Pivot levels (horizontal lines on price chart)
         pivots = technicals.get("pivots")
@@ -191,11 +222,11 @@ def render(selected_index: str, display_name: str, timeframe: str) -> None:
             tech_fig.add_trace(
                 go.Scatter(x=chart_df.index, y=rsi_series, mode="lines", name="RSI",
                            line=dict(color="#ab47bc", width=1.5)),
-                row=2, col=1,
+                row=3, col=1,
             )
-            tech_fig.add_hline(y=70, line_dash="dash", line_color="#ef5350", opacity=0.5, row=2, col=1)
-            tech_fig.add_hline(y=30, line_dash="dash", line_color="#66bb6a", opacity=0.5, row=2, col=1)
-            tech_fig.add_hrect(y0=30, y1=70, fillcolor="#fdd835", opacity=0.05, row=2, col=1)
+            tech_fig.add_hline(y=70, line_dash="dash", line_color="#ef5350", opacity=0.5, row=3, col=1)
+            tech_fig.add_hline(y=30, line_dash="dash", line_color="#66bb6a", opacity=0.5, row=3, col=1)
+            tech_fig.add_hrect(y0=30, y1=70, fillcolor="#fdd835", opacity=0.05, row=3, col=1)
 
         # 6) MACD subplot
         macd_result = _macd(chart_df["close"], fast=12, slow=26, signal=9)
@@ -203,25 +234,25 @@ def render(selected_index: str, display_name: str, timeframe: str) -> None:
             tech_fig.add_trace(
                 go.Scatter(x=chart_df.index, y=macd_result["macd"], mode="lines",
                            name="MACD", line=dict(color="#42a5f5", width=1.2)),
-                row=3, col=1,
+                row=4, col=1,
             )
             tech_fig.add_trace(
                 go.Scatter(x=chart_df.index, y=macd_result["signal"], mode="lines",
                            name="Signal", line=dict(color="#ef6c00", width=1.2)),
-                row=3, col=1,
+                row=4, col=1,
             )
             hist_vals = macd_result["histogram"]
             colours = ["#66bb6a" if v >= 0 else "#ef5350" for v in hist_vals]
             tech_fig.add_trace(
                 go.Bar(x=chart_df.index, y=hist_vals, name="Histogram",
                        marker_color=colours, opacity=0.6),
-                row=3, col=1,
+                row=4, col=1,
             )
 
         # Layout
         tech_fig.update_layout(
             title=chart_title,
-            height=700,
+            height=800,
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             margin=dict(l=50, r=20, t=40, b=30),
@@ -229,8 +260,9 @@ def render(selected_index: str, display_name: str, timeframe: str) -> None:
             hovermode="x unified",
         )
         tech_fig.update_yaxes(title_text="Price", row=1, col=1)
-        tech_fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
-        tech_fig.update_yaxes(title_text="MACD", row=3, col=1)
+        tech_fig.update_yaxes(title_text="Vol", row=2, col=1)
+        tech_fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+        tech_fig.update_yaxes(title_text="MACD", row=4, col=1)
 
         st.plotly_chart(tech_fig, width="stretch", key="tech_chart")
 
