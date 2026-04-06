@@ -6,5 +6,6 @@ from services.data_fetcher import (  # noqa: F401
     fetch_historical,
     fetch_intraday,
     fetch_nse_option_chain,
+    fetch_nse_expiry_dates,
     fetch_fii_dii,
 )

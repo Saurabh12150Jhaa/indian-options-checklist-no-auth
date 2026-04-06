@@ -23,7 +23,9 @@ def parse_nse_option_chain(nse_data: dict, expiry: Optional[str] = None) -> pd.D
 
     rows = []
     for item in data_list:
-        if expiry and item.get("expiryDate") != expiry:
+        # v3 API uses "expiryDates" (plural), legacy uses "expiryDate" (singular)
+        item_expiry = item.get("expiryDate") or item.get("expiryDates")
+        if expiry and item_expiry != expiry:
             continue
 
         strike = item.get("strikePrice", 0)
@@ -37,15 +39,16 @@ def parse_nse_option_chain(nse_data: dict, expiry: Optional[str] = None) -> pd.D
             "call_volume": ce.get("totalTradedVolume", 0),
             "call_iv": ce.get("impliedVolatility", 0),
             "call_ltp": ce.get("lastPrice", 0),
-            "call_bid": ce.get("bidprice", 0),
-            "call_ask": ce.get("askPrice", 0),
+            # v3 uses buyPrice1/sellPrice1; legacy uses bidprice/askPrice
+            "call_bid": ce.get("bidprice") or ce.get("buyPrice1", 0),
+            "call_ask": ce.get("askPrice") or ce.get("sellPrice1", 0),
             "put_oi": pe.get("openInterest", 0),
             "put_chg_oi": pe.get("changeinOpenInterest", 0),
             "put_volume": pe.get("totalTradedVolume", 0),
             "put_iv": pe.get("impliedVolatility", 0),
             "put_ltp": pe.get("lastPrice", 0),
-            "put_bid": pe.get("bidprice", 0),
-            "put_ask": pe.get("askPrice", 0),
+            "put_bid": pe.get("bidprice") or pe.get("buyPrice1", 0),
+            "put_ask": pe.get("askPrice") or pe.get("sellPrice1", 0),
         })
 
     df = pd.DataFrame(rows)

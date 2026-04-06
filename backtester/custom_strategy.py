@@ -788,8 +788,8 @@ CUSTOM_PRESETS = {
             {"template": "otm_call_half", "action": "BUY", "qty": 1},
         ],
     },
-    "Range-Bound Low ADX Strangle Sell": {
-        "name": "Range-Bound Low ADX Strangle Sell",
+    "Sideways Low ADX Strangle Sell": {
+        "name": "Sideways Low ADX Strangle Sell",
         "conditions": [
             {"type": "trend_strength", "params": {"period": 14, "operator": "<", "value": 20}},
             {"type": "bollinger", "params": {"period": 20, "num_std": 2.0, "position": "within"}},

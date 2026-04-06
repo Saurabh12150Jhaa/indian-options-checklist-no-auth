@@ -310,7 +310,7 @@ def render() -> None:
                 preset_groups = {
                     "Bullish": [],
                     "Bearish": [],
-                    "Neutral / Range-Bound": [],
+                    "Neutral / Sideways": [],
                     "Volatility": [],
                     "Expiry Day": [],
                 }
@@ -321,7 +321,7 @@ def render() -> None:
                     elif any(w in n for w in ("bear", "short_buildup")):
                         preset_groups["Bearish"].append((name, preset))
                     elif any(w in n for w in ("straddle sell", "strangle sell", "iron", "range", "squeeze", "low adx")):
-                        preset_groups["Neutral / Range-Bound"].append((name, preset))
+                        preset_groups["Neutral / Sideways"].append((name, preset))
                     elif any(w in n for w in ("expiry", "thursday")):
                         preset_groups["Expiry Day"].append((name, preset))
                     else:

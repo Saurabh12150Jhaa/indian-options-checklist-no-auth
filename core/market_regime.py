@@ -1,8 +1,8 @@
 """
 Market Regime Detector & Strategy Advisor.
 
-Classifies the trading day into regimes (trending, range-bound, volatile, expiry)
-based on VIX, ADX, ORB range, gap analysis, CPR, and OI data.
+Classifies the trading day into regimes (trending_up, trending_down, sideways,
+volatile, expiry) using price-action-first approach with directional awareness.
 Recommends strategies appropriate for the detected regime.
 """
 
@@ -205,7 +205,7 @@ class DayClassification:
         type_labels = {
             "trending_up": "Trending Up (Bullish)",
             "trending_down": "Trending Down (Bearish)",
-            "sideways": "Sideways / Range-Bound",
+            "sideways": "Sideways / Low Momentum",
             "volatile": "Volatile / Choppy",
             "expiry": "Expiry Day",
         }

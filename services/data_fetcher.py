@@ -18,6 +18,8 @@ from config import (
     INDIA_VIX_TICKER,
     GLOBAL_TICKERS,
     NSE_OPTION_CHAIN_URL,
+    NSE_OPTION_CHAIN_V3_URL,
+    NSE_OPTION_CHAIN_CONTRACT_INFO_URL,
     NSE_FII_DII_URL,
     NSE_ALL_INDICES_URL,
     IST,
@@ -148,9 +150,35 @@ def fetch_intraday(index_name: str, interval: str = "15m") -> tuple[Optional[pd.
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def fetch_nse_option_chain(index_name: str) -> tuple[Optional[dict], datetime]:
+def fetch_nse_expiry_dates(index_name: str) -> list[str]:
+    """
+    Fetch available expiry dates for an index from NSE contract-info endpoint.
+    Returns a list of expiry date strings (e.g. ['07-Apr-2026', ...]) or [].
+    """
+    cfg = INDEX_CONFIG.get(index_name)
+    if not cfg:
+        return []
+    url = NSE_OPTION_CHAIN_CONTRACT_INFO_URL.format(symbol=cfg["nse_symbol"])
+    client = get_nse_client()
+    data = client.get(url)
+    if data and isinstance(data.get("expiryDates"), list):
+        return data["expiryDates"]
+    return []
+
+
+def fetch_nse_option_chain(
+    index_name: str,
+    expiry: Optional[str] = None,
+) -> tuple[Optional[dict], datetime]:
     """
     Fetch option chain from NSE for the given index.
+
+    Tries the v3 endpoint first (``/api/option-chain-v3``), which requires
+    an explicit *expiry* date.  If *expiry* is not supplied we first ask the
+    contract-info endpoint for available dates and pick the nearest one.
+
+    Falls back to the legacy ``/api/option-chain-indices`` endpoint when v3
+    fails (e.g. if NSE rolls things back).
 
     Returns the raw NSE JSON payload:
       { "records": { "data": [...], "expiryDates": [...],
@@ -163,12 +191,32 @@ def fetch_nse_option_chain(index_name: str) -> tuple[Optional[dict], datetime]:
     if not cfg:
         return None, datetime.now(IST)
 
-    url = NSE_OPTION_CHAIN_URL.format(symbol=cfg["nse_symbol"])
     client = get_nse_client()
+
+    # ── v3 path (preferred) ────────────────────────────────────────────
+    target_expiry = expiry
+    if target_expiry is None:
+        expiry_list = fetch_nse_expiry_dates(index_name)
+        if expiry_list:
+            target_expiry = expiry_list[0]  # nearest expiry
+
+    if target_expiry:
+        url = NSE_OPTION_CHAIN_V3_URL.format(
+            type="Indices",
+            symbol=cfg["nse_symbol"],
+            expiry=target_expiry,
+        )
+        data = client.get(url)
+        if data and data.get("records"):
+            return data, datetime.now(IST)
+        logger.debug("v3 option-chain returned empty for %s expiry %s", index_name, target_expiry)
+
+    # ── Legacy fallback ────────────────────────────────────────────────
+    url = NSE_OPTION_CHAIN_URL.format(symbol=cfg["nse_symbol"])
     data = client.get(url)
-    # Treat empty dict as "no data"
     if data and data.get("records"):
         return data, datetime.now(IST)
+
     return None, datetime.now(IST)
 
 

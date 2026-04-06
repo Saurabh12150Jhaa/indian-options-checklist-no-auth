@@ -11,6 +11,8 @@ import pandas as pd
 
 from config import (
     NSE_EQUITY_OPTION_CHAIN_URL,
+    NSE_OPTION_CHAIN_V3_URL,
+    NSE_OPTION_CHAIN_CONTRACT_INFO_URL,
     NSE_TOP_GAINERS_URL,
     NSE_TOP_LOSERS_URL,
     NSE_ADVANCES_DECLINES_URL,
@@ -27,10 +29,25 @@ logger = logging.getLogger(__name__)
 def fetch_stock_option_chain(symbol: str) -> tuple[Optional[dict], datetime]:
     """
     Fetch option chain for an equity stock (e.g., RELIANCE, INFY).
+    Tries the v3 endpoint first, falls back to legacy.
     Returns the raw NSE JSON payload.
     """
-    url = NSE_EQUITY_OPTION_CHAIN_URL.format(symbol=symbol)
     client = get_nse_client()
+
+    # ── v3 path ────────────────────────────────────────────────────────
+    info_url = NSE_OPTION_CHAIN_CONTRACT_INFO_URL.format(symbol=symbol)
+    info = client.get(info_url)
+    if info and isinstance(info.get("expiryDates"), list) and info["expiryDates"]:
+        nearest = info["expiryDates"][0]
+        url = NSE_OPTION_CHAIN_V3_URL.format(
+            type="Equities", symbol=symbol, expiry=nearest,
+        )
+        data = client.get(url)
+        if data and data.get("records"):
+            return data, datetime.now(IST)
+
+    # ── Legacy fallback ────────────────────────────────────────────────
+    url = NSE_EQUITY_OPTION_CHAIN_URL.format(symbol=symbol)
     data = client.get(url)
     if data and data.get("records"):
         return data, datetime.now(IST)

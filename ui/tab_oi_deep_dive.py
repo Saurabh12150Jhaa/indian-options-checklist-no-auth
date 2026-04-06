@@ -15,6 +15,7 @@ def render(selected_index: str, display_name: str) -> None:
     try:
         from oi_tracker import get_oi_timeline, get_aggregate_oi_timeline, get_tracked_dates
         from analysis import parse_nse_option_chain, get_expiry_dates as get_expiries
+        from services.data_fetcher import fetch_nse_option_chain
 
         # Get shared data from session state
         nse_data = st.session_state.get("_checklist_nse_data")
@@ -32,10 +33,18 @@ def render(selected_index: str, display_name: str) -> None:
                 st.caption(track_info)
 
             # Multi-expiry OI comparison
+            # v3 API returns data for one expiry at a time, so we fetch each
             st.subheader("Multi-Expiry OI Comparison")
             chain_dfs = {}
             for exp in expiry_list_deep[:4]:
+                # First try parsing from in-memory data (works if it's the
+                # same expiry that was already fetched)
                 cdf = parse_nse_option_chain(nse_data, exp)
+                if cdf.empty:
+                    # Fetch this expiry separately via v3
+                    exp_data, _ = fetch_nse_option_chain(selected_index, expiry=exp)
+                    if exp_data:
+                        cdf = parse_nse_option_chain(exp_data)
                 if not cdf.empty:
                     chain_dfs[exp] = cdf
 
@@ -79,6 +88,10 @@ def render(selected_index: str, display_name: str) -> None:
             # ITM/OTM Analysis
             if nse_data and deep_expiry:
                 deep_chain = parse_nse_option_chain(nse_data, deep_expiry)
+                if deep_chain.empty:
+                    exp_data, _ = fetch_nse_option_chain(selected_index, expiry=deep_expiry)
+                    if exp_data:
+                        deep_chain = parse_nse_option_chain(exp_data)
                 spot_val = options_result.get("spot", ltp) or ltp
                 if not deep_chain.empty and spot_val > 0:
                     st.subheader("ITM / OTM Analysis")

@@ -35,6 +35,8 @@ PRE_MARKET_OPEN = dtime(9, 0)
 # ── NSE endpoints ─────────────────────────────────────────────────────────
 NSE_BASE_URL = "https://www.nseindia.com"
 NSE_OPTION_CHAIN_URL = NSE_BASE_URL + "/api/option-chain-indices?symbol={symbol}"
+NSE_OPTION_CHAIN_V3_URL = NSE_BASE_URL + "/api/option-chain-v3?type={type}&symbol={symbol}&expiry={expiry}"
+NSE_OPTION_CHAIN_CONTRACT_INFO_URL = NSE_BASE_URL + "/api/option-chain-contract-info?symbol={symbol}"
 NSE_FII_DII_URL = NSE_BASE_URL + "/api/fiidiiTradeReact"
 NSE_ALL_INDICES_URL = NSE_BASE_URL + "/api/allIndices"
 NSE_MARKET_STATUS_URL = NSE_BASE_URL + "/api/marketStatus"
