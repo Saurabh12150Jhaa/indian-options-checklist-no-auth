@@ -334,6 +334,9 @@ Optional: `curl_cffi` for TLS fingerprint impersonation (bypasses NSE Akamai bot
 
 ---
 
+## Deployed link [indian-options-checklist-no-app](https://indian-options-checklist-no-app-cxkgahk3s6stuqbfoxcjjt.streamlit.app/)
+
+
 ## Usage Notes
 
 - **Best during market hours** (9:15 AM -- 3:30 PM IST) for real-time NSE data
